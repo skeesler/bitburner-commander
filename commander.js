@@ -276,7 +276,8 @@ function drainStats(ns, fleetStats) {
   } catch { /* ignore malformed stats */ }
 }
 
-let _lastIncome = 0, _lastT = 0, _incomeWarned = false, _startIncome = null;
+let _startIncome = null, _startT = 0, _incomeWarned = false;
+const _fleetBase = new Map();   // target -> estEarned when first seen THIS run (for this-run per-fleet totals)
 
 /** Short currency-ish formatting, robust to ns.formatNumber being absent. */
 function fmt(ns, n) {
@@ -287,34 +288,40 @@ function fmt(ns, n) {
   return n.toFixed(0);
 }
 
-/** One-line earnings summary: total hacked $, rate, and best/worst fleet.
- *  Written so it can NEVER throw — it always prints a line. */
+/** Earnings summary: this-run total + average rate, all-time total, and the
+ *  best/worst fleet (scoped to this run). Written so it can NEVER throw. */
 function printSummary(ns, fleetStats) {
   const entries = [...fleetStats.values()];
 
-  // Prefer the game's real hacking income; if that call isn't available in this
-  // version, fall back to summing the fleets' own estimates (and say so once).
-  let income;
+  // All-time hacking income (real). Fall back to summed fleet estimates if the
+  // API isn't available in this version (and say so once).
+  let allTime;
   try {
-    income = ns.getMoneySources().sinceInstall.hacking;
+    allTime = ns.getMoneySources().sinceInstall.hacking;
   } catch (e) {
-    income = entries.reduce((sum, x) => sum + (x.estEarned || 0), 0);
-    if (!_incomeWarned) { ns.print(`note: getMoneySources unavailable (${e}) — using summed fleet estimates`); _incomeWarned = true; }
+    allTime = entries.reduce((sum, x) => sum + (x.estEarned || 0), 0);
+    if (!_incomeWarned) { ns.print(`note: getMoneySources unavailable (${e}) — totals are estimates`); _incomeWarned = true; }
   }
 
   const nowT = Date.now();
-  const rate = _lastT ? (income - _lastIncome) / Math.max(1, (nowT - _lastT) / 1000) : 0;
-  _lastIncome = income; _lastT = nowT;
-  if (_startIncome === null) _startIncome = income;   // baseline at commander start = only count THIS run
+  if (_startIncome === null) { _startIncome = allTime; _startT = nowT; }   // baseline at commander start
+  const run = allTime - _startIncome;
+  const rate = run / Math.max(1, (nowT - _startT) / 1000);   // run AVERAGE $/s — robust, never stuck at 0
 
-  const head = `hacked $${fmt(ns, income - _startIncome)} this run (~$${fmt(ns, rate)}/s)`;
+  const head = `hacked: $${fmt(ns, run)} run (~$${fmt(ns, rate)}/s), $${fmt(ns, allTime)} all-time`;
   if (!entries.length) { ns.print(`${head} | fleets warming up`); return; }
-  let top = entries[0], low = entries[0];
+
+  // Per-fleet "this run" = estEarned minus its value when first seen this run, so a
+  // fleet that outlived a commander restart doesn't report its entire lifetime.
+  let top = null, low = null;
   for (const x of entries) {
-    if (x.estEarned > top.estEarned) top = x;
-    if (x.estEarned < low.estEarned) low = x;
+    let base = _fleetBase.get(x.target);
+    if (base === undefined || x.estEarned < base) { base = x.estEarned; _fleetBase.set(x.target, base); }  // (re)baseline on first sight / fleet restart
+    const earned = x.estEarned - base;
+    if (!top || earned > top.earned) top = { target: x.target, earned };
+    if (!low || earned < low.earned) low = { target: x.target, earned };
   }
-  ns.print(`${head} | ${entries.length} fleets | top ${top.target} ~$${fmt(ns, top.estEarned)} | low ${low.target} ~$${fmt(ns, low.estEarned)}`);
+  ns.print(`${head} | ${entries.length} fleets | top ${top.target} ~$${fmt(ns, top.earned)} | low ${low.target} ~$${fmt(ns, low.earned)}`);
 }
 
 /** Rank rooted, in-level, reliable targets by a $/sec proxy at prepped state. */
