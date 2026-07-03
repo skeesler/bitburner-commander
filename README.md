@@ -111,7 +111,9 @@ It runs in one of two modes, chosen automatically:
   **W**eaken, **G**row, **W**eaken — that land a few milliseconds apart so a
   server is drained and refilled in a continuous, efficient stream, always kept
   at its ideal "prepped" state (minimum security, maximum money). `batcher-pipe.js`
-  runs many of these at once to keep a big server's RAM fully working.
+  runs many of these at once to keep a big server's RAM fully working. Your
+  `home` server joins the fleet as the top batcher host (biggest RAM + cores),
+  keeping a reserve free so the commander and contract-solver still run there.
 - **Fallback mode** (no `Formulas.exe`) — a simpler reactive worker
   (`early-hacking-template.js`) that just loops "weaken if too secure, grow if too
   poor, else hack." Less efficient, but needs no special tools and gets you

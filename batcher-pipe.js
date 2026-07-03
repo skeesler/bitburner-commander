@@ -2,7 +2,11 @@
  *
  *  Formulas-powered HWGW batcher — PIPELINED (single-host).
  *
- *      run batcher-pipe.js <target> [hackFraction]
+ *      run batcher-pipe.js <target> [hackFraction] [quiet] [reserveGB]
+ *
+ *  quiet:     pass the string "quiet" to suppress the auto tail window.
+ *  reserveGB: hold this many GB free on the host (e.g. on home, so the
+ *             commander and contract-solver keep their room). Default 0.
  *
  *  Same math as batcher.js, but instead of waiting for each batch to land,
  *  it launches a fresh batch every BATCH_GAP ms. Dozens are in flight at
@@ -31,7 +35,8 @@ export async function main(ns) {
   ns.disableLog("ALL");
   const target = ns.args[0];
   const hackFraction = ns.args[1] ?? 0.25;
-  if (!target) { ns.tprint("Usage: run batcher-pipe.js <target> [hackFraction]"); return; }
+  const reserve = Number(ns.args[3]) || 0;   // GB to hold free on this host (e.g. home)
+  if (!target) { ns.tprint("Usage: run batcher-pipe.js <target> [hackFraction] [quiet] [reserveGB]"); return; }
   if (!ns.fileExists("Formulas.exe", "home")) { ns.tprint("ERROR: need Formulas.exe on home"); return; }
 
   const host = ns.getHostname();
@@ -46,7 +51,7 @@ export async function main(ns) {
   if (ns.args[2] !== "quiet") ns.ui.openTail();
   ns.print(`Pipelining ${target} from ${host} (${cores} cores), ${Math.round(hackFraction * 100)}%/batch`);
 
-  await prep(ns, target, host, cores);
+  await prep(ns, target, host, cores, reserve);
   ns.print("Prepped. Filling the pipe...");
 
   let id = 0;
@@ -62,19 +67,19 @@ export async function main(ns) {
     if (!isHealthy(ns, target, hackFraction)) {
       ns.print(`WARN: ${target} genuinely desynced — draining and re-prepping.`);
       await drain(ns, target, host);
-      await prep(ns, target, host, cores);
+      await prep(ns, target, host, cores, reserve);
       ns.print("Re-prepped. Refilling the pipe...");
     }
 
     const b = planBatch(ns, target, cores, hackFraction);
-    const ratio = scaleForOneBatch(ns, host, b);
+    const ratio = scaleForOneBatch(ns, host, b, reserve);
 
     const hT = Math.floor(b.hackThreads * ratio);
     const w1 = Math.floor(b.weaken1Threads * ratio);
     const gT = Math.floor(b.growThreads * ratio);
     const w2 = Math.floor(b.weaken2Threads * ratio);
 
-    if (hT >= 1 && w1 >= 1 && gT >= 1 && w2 >= 1 && fits(ns, host, b, ratio)) {
+    if (hT >= 1 && w1 >= 1 && gT >= 1 && w2 >= 1 && fits(ns, host, b, ratio, reserve)) {
       id++;
       exec(ns, HACK,   host, hT, target, b.hackDelay,    id);
       exec(ns, WEAKEN, host, w1, target, b.weaken1Delay, id);
@@ -158,15 +163,15 @@ function batchRam(ns, b, ratio) {
                                   + Math.floor(b.weaken2Threads * ratio));
 }
 
-/** Does one more full-size batch fit in the RAM free right now? */
-function fits(ns, host, b, ratio) {
-  const free = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+/** Does one more full-size batch fit in the RAM free right now (minus reserve)? */
+function fits(ns, host, b, ratio, reserve = 0) {
+  const free = Math.max(0, ns.getServerMaxRam(host) - ns.getServerUsedRam(host) - reserve);
   return batchRam(ns, b, ratio) <= free;
 }
 
-/** Scale a single batch down only if one batch can't fit even in an empty host. */
-function scaleForOneBatch(ns, host, b) {
-  const maxRam = ns.getServerMaxRam(host);
+/** Scale a single batch down only if one batch can't fit the host (minus reserve). */
+function scaleForOneBatch(ns, host, b, reserve = 0) {
+  const maxRam = Math.max(0, ns.getServerMaxRam(host) - reserve);
   const full = batchRam(ns, b, 1);
   if (full <= maxRam) return 1;              // fits — pipeline many at ratio 1
   return Math.min(1, maxRam / full) * 0.98;  // single batch too big; shrink it
@@ -182,7 +187,7 @@ function countInFlight(ns, host) {
   return ns.ps(host).filter(p => p.filename === HACK || p.filename === GROW || p.filename === WEAKEN).length;
 }
 
-async function prep(ns, target, host, cores) {
+async function prep(ns, target, host, cores, reserve = 0) {
   const f = ns.formulas.hacking;
   const maxMoney = ns.getServerMaxMoney(target);
   const minSec = ns.getServerMinSecurityLevel(target);
@@ -198,7 +203,7 @@ async function prep(ns, target, host, cores) {
     const excessSec = curSec - minSec;
     let weakenThreads = Math.max(1, Math.ceil((excessSec + growThreads * SEC_GROW) / SEC_WEAKEN));
 
-    const ratio = prepRatio(ns, host, growThreads, weakenThreads);
+    const ratio = prepRatio(ns, host, growThreads, weakenThreads, reserve);
     growThreads = Math.floor(growThreads * ratio);
     weakenThreads = Math.max(1, Math.floor(weakenThreads * ratio));
 
@@ -218,10 +223,10 @@ async function prep(ns, target, host, cores) {
   }
 }
 
-function prepRatio(ns, host, growThreads, weakenThreads) {
+function prepRatio(ns, host, growThreads, weakenThreads, reserve = 0) {
   const need = ns.getScriptRam(GROW) * growThreads + ns.getScriptRam(WEAKEN) * weakenThreads;
   if (need === 0) return 1;
-  const free = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+  const free = Math.max(0, ns.getServerMaxRam(host) - ns.getServerUsedRam(host) - reserve);
   return Math.min(1, free / need);
 }
 

@@ -9,8 +9,8 @@
  *    2. Buys ONE more purchased server (>= buyRam, power of two) if affordable,
  *       up to the server limit, and stages the batcher + workers onto it.
  *    3. Ranks all rooted, in-level targets by profitability (via Formulas).
- *    4. Ensures each purchased server is running a pipe batcher against its own
- *       DISTINCT top target — launching only where one isn't already running.
+ *    4. Ensures home and each purchased server is running a pipe batcher against
+ *       its own DISTINCT top target — launching only where one isn't already running.
  *    5. Finds and auto-solves coding contracts (money + faction rep) network-wide,
  *       unless you pass --no-auto-solves.
  *
@@ -150,7 +150,7 @@ function maybeBuyServer(ns, buyRam) {
   }
 }
 
-/** Launch a batcher on every idle purchased server against a distinct top target. */
+/** Launch a batcher on home + every idle purchased server, each against a distinct top target. */
 function ensureBatchers(ns, all, hackFraction) {
   const pservs = ns.cloud.getServerNames();
   const pservSet = new Set(pservs);
@@ -171,19 +171,23 @@ function ensureBatchers(ns, all, hackFraction) {
   const ranked = rankTargets(ns, all, taken, pservSet);
   let idx = 0;
   const launched = [];
-  for (const host of pservs) {
+  // Home first: it's the biggest, best-cored host, so it earns the #1 target.
+  const hosts = ["home", ...pservs];
+  for (const host of hosts) {
     if (busyHosts.has(host)) continue;
     if (idx >= ranked.length) break;              // no unclaimed targets left right now
     const target = ranked[idx++];
-    ns.scp(FILES, host);                          // ensure files present (cheap if already there)
-    if (ns.exec(BATCHER, host, 1, target, hackFraction, "quiet")) {   // "quiet" = no auto tail window
+    ns.scriptKill(WORKER, host);                  // clear any leftover fallback worker so it can't collide
+    if (host !== "home") ns.scp(FILES, host);     // home already has the files (commander runs there)
+    const reserve = host === "home" ? HOME_RESERVE_GB : 0;   // leave room for commander + contract-solver on home
+    if (ns.exec(BATCHER, host, 1, target, hackFraction, "quiet", reserve)) {
       taken.add(target);
       launched.push(`${host}->${target}`);
     }
   }
 
-  const idle = pservs.filter(h => !busyHosts.has(h)).length - launched.length;
-  ns.print(`pservs ${pservs.length}/${ns.cloud.getServerLimit()} | ` +
+  const idle = hosts.filter(h => !busyHosts.has(h)).length - launched.length;
+  ns.print(`hosts ${hosts.length} (home + ${pservs.length} cloud) | ` +
            `batchers ${busyHosts.size + launched.length} running` +
            (launched.length ? `, +${launched.length} new (${launched.join(", ")})` : "") +
            (idle > 0 ? ` | ${idle} idle, no free targets` : ""));
