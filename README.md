@@ -110,10 +110,13 @@ It runs in one of two modes, chosen automatically:
   **HWGW batches**: tightly-timed groups of four operations — **H**ack,
   **W**eaken, **G**row, **W**eaken — that land a few milliseconds apart so a
   server is drained and refilled in a continuous, efficient stream, always kept
-  at its ideal "prepped" state (minimum security, maximum money). `batcher-pipe.js`
-  runs many of these at once to keep a big server's RAM fully working. Your
-  `home` server joins the fleet as the top batcher host (biggest RAM + cores),
-  keeping a reserve free so the commander and contract-solver still run there.
+  at its ideal "prepped" state (minimum security, maximum money). The commander
+  groups all your machines — `home`, cloud servers, and every rooted world server —
+  into **fleets** (one per target) and runs a distributed `fleet-batcher.js` for
+  each: many servers pool their RAM onto a single juicy target instead of wasting a
+  whole box on a scrap. A reserve is kept free on `home` so the commander and
+  contract-solver keep running, and the commander tail prints a live earnings
+  summary (total this run, $/sec, and the best/worst fleet).
 - **Fallback mode** (no `Formulas.exe`) — a simpler reactive worker
   (`early-hacking-template.js`) that just loops "weaken if too secure, grow if too
   poor, else hack." Less efficient, but needs no special tools and gets you
@@ -125,13 +128,15 @@ It runs in one of two modes, chosen automatically:
 
 | File | What it is |
 |---|---|
-| **commander.js** | The one you run. Orchestrates everything; auto-selects batching vs. fallback. |
-| **batcher-pipe.js** | Pipelined HWGW batcher — the high-throughput engine (needs Formulas.exe). |
-| **batcher.js** | Simpler one-batch-at-a-time batcher. Easier to read; good for learning. |
+| **commander.js** | The one you run. Orchestrates everything; auto-selects batching vs. fallback, and prints a live earnings summary. |
+| **fleet-batcher.js** | Distributed HWGW batcher — one controller drives ONE target using a whole FLEET of servers, pooling their RAM. This is what the commander launches in batching mode. |
+| **batcher-pipe.js** | Single-host pipelined HWGW batcher. Superseded by fleet-batcher for the fleet; kept as a simpler standalone/reference version. |
+| **batcher.js** | Simplest one-batch-at-a-time batcher. Easiest to read; good for learning. |
 | **hack.js / grow.js / weaken.js** | Tiny one-line workers. A batch is built from these. |
 | **early-hacking-template.js** | The reactive worker used by fallback mode. Fine on its own for a beginner. |
 | **purchase-servers.js** | Standalone "buy a fleet of servers" script. The commander does this too. |
 | **contract-finder.js** | Finds coding contracts network-wide and auto-solves the ~22 types it knows (never guesses blind). The commander runs it automatically; run it yourself with `--auto-solve`, or list-only with no flags. |
+| **reset-scripts.js** | Emergency stop / clean slate — kills every script on every server (except itself). Run it before a major version hand-off, or to halt everything fast. |
 | **formulas-api-reference.md** | Notes on Bitburner's Formulas API — signatures, gotchas, examples. |
 
 ---
@@ -172,9 +177,11 @@ It runs in one of two modes, chosen automatically:
   current delete-and-rebuy (cleaner, and doesn't interrupt running scripts).
 - Detect `Formulas.exe` appearing mid-run and switch from fallback to batching
   without a manual re-run.
-- Reassign already-running batchers to better targets as your hacking level climbs
-  (currently only idle hosts get new targets, to avoid income churn).
-- A truly distributed batcher that pools the whole fleet's RAM against one target.
+- Re-optimize *running* fleets when a clearly-better host↔target pairing exists.
+  Fleets are frozen once launched, so a poor assignment made during server-upgrade
+  churn sticks until you restart the commander.
+- Grow a running fleet as new servers are bought (a new host currently only seeds a
+  new fleet for the next un-batched target, never enlarges an existing fleet).
 - Denser batch pipelining for higher throughput.
 
 ---

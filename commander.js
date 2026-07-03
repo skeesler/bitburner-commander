@@ -9,8 +9,8 @@
  *    2. Buys ONE more purchased server (>= buyRam, power of two) if affordable,
  *       up to the server limit, and stages the batcher + workers onto it.
  *    3. Ranks all rooted, in-level targets by profitability (via Formulas).
- *    4. Ensures home and each purchased server is running a pipe batcher against
- *       its own DISTINCT top target — launching only where one isn't already running.
+ *    4. Groups home + cloud servers into FLEETS (one per top target) and runs a
+ *       distributed fleet-batcher for each — pooling many servers onto one target.
  *    5. Finds and auto-solves coding contracts (money + faction rep) network-wide,
  *       unless you pass --no-auto-solves.
  *
@@ -22,14 +22,20 @@
  *  small to host it, run it on one of your purchased servers instead.
  */
 
-const BATCHER = "batcher-pipe.js";
-const FILES = [BATCHER, "hack.js", "grow.js", "weaken.js"];
+const FLEET = "fleet-batcher.js";
+const FILES = [FLEET, "hack.js", "grow.js", "weaken.js"];
 const CONTRACT_FINDER = "contract-finder.js";
-const DEFAULT_RAM = 512;     // used when no size arg is given; NOT a hard floor
-const HOME_RESERVE_GB = 64;  // keep this much free on home for commander itself + your own scripts
-const TICK = 10000;          // control-loop interval, ms
-const CONTRACT_EVERY = 6;    // run the contract solver every N ticks (~once a minute)
-const MIN_CHANCE = 0.5;      // skip targets whose prepped hack chance is below this
+const HACK = "hack.js", GROW = "grow.js", WEAKEN = "weaken.js";
+const SEC_HACK = 0.002, SEC_GROW = 0.004, SEC_WEAKEN = 0.05;
+const BATCH_GAP = 800;         // must match fleet-batcher.js (used for saturation sizing)
+const STATS_PORT = 1;          // fleet-batchers post earnings snapshots here
+const MAX_FLEET_SHARE = 1 / 3; // no single target's fleet may exceed this share of the pool
+const DEFAULT_RAM = 512;       // used when no size arg is given; NOT a hard floor
+const HOME_RESERVE_GB = 64;    // keep this free on home for commander + contract-solver
+const TICK = 10000;            // control-loop interval, ms
+const CONTRACT_EVERY = 6;      // run the contract solver every N ticks (~once a minute)
+const SUMMARY_EVERY = 3;       // print the earnings summary every N ticks (~30s)
+const MIN_CHANCE = 0.5;        // skip targets whose prepped hack chance is below this
 
 export async function main(ns) {
   ns.disableLog("ALL");
@@ -53,11 +59,12 @@ export async function main(ns) {
   ns.print(`Coding-contract auto-solve: ${autoSolve ? "ON" : "OFF (--no-auto-solves)"}`);
 
   let tick = 0, lastRooted = -1;
+  const fleetStats = new Map();   // target -> latest earnings snapshot from its fleet-batcher
   while (true) {
     const all = scanAll(ns);
     rootAll(ns, all);
     maybeBuyServer(ns, buyRam);
-    if (hasFormulas) ensureBatchers(ns, all, hackFraction);
+    if (hasFormulas) ensureFleets(ns, all, hackFraction);
     else deployReactive(ns, all);
     if (autoSolve && tick % CONTRACT_EVERY === 0) solveContracts(ns);
 
@@ -66,6 +73,12 @@ export async function main(ns) {
     const rooted = all.filter(s => !pservs.has(s) && ns.hasRootAccess(s)).length;
     const total = all.filter(s => !pservs.has(s)).length;
     if (rooted !== lastRooted) { ns.print(`hacked ${rooted}/${total} servers`); lastRooted = rooted; }
+
+    // Earnings summary (batching mode): total hacked $, rate, best/worst fleet.
+    if (hasFormulas) {
+      drainStats(ns, fleetStats);
+      if (tick % SUMMARY_EVERY === 0) printSummary(ns, fleetStats);
+    }
 
     tick++;
     await ns.sleep(TICK);
@@ -150,47 +163,158 @@ function maybeBuyServer(ns, buyRam) {
   }
 }
 
-/** Launch a batcher on home + every idle purchased server, each against a distinct top target. */
-function ensureBatchers(ns, all, hackFraction) {
+/** Assign the whole host pool (home + cloud) into FLEETS — one per top target,
+ *  best target first, each capped at a share of the pool so several good targets
+ *  get served — and launch a distributed fleet-batcher for any target not already
+ *  being batched. Idempotent: reads the JSON config of running fleet-batchers to
+ *  see which targets/hosts are claimed, and fills only the gaps. */
+function ensureFleets(ns, all, hackFraction) {
   const pservs = ns.cloud.getServerNames();
   const pservSet = new Set(pservs);
+  // Work pool = home + cloud servers + every rooted WORLD server with usable RAM.
+  // Rooted world servers (CSEC, foodnstuff, ...) can run our workers too — free
+  // capacity we'd otherwise waste. (A server can be a work host for one fleet and
+  // a hack target of another at the same time; the two roles don't interfere.)
+  const worldHosts = all.filter(h => !pservSet.has(h) && ns.hasRootAccess(h) && ns.getServerMaxRam(h) > 0);
+  const pool = [
+    { h: "home", r: HOME_RESERVE_GB },
+    ...pservs.map(h => ({ h, r: 0 })),
+    ...worldHosts.map(h => ({ h, r: 0 })),
+  ];
 
-  // Discover what's already running and which targets are already claimed
-  // (scan the whole network so manual batchers on home are respected too).
-  const busyHosts = new Set();
-  const taken = new Set();
-  for (const h of [...all, ...pservs, "home"]) {
-    for (const p of ns.ps(h)) {
-      if (p.filename === BATCHER) {
-        busyHosts.add(h);
-        if (p.args && p.args.length) taken.add(String(p.args[0]));
-      }
+  // Discover running fleets: which targets are batched, which hosts are claimed.
+  const batchedTargets = new Set();
+  const claimed = new Set();
+  for (const host of [...all, ...pservs, "home"]) {
+    for (const p of ns.ps(host)) {
+      if (p.filename !== FLEET || !p.args.length) continue;
+      try {
+        const cfg = JSON.parse(p.args[0]);
+        batchedTargets.add(cfg.target);
+        for (const { h } of cfg.hosts) claimed.add(h);
+      } catch { /* ignore malformed config */ }
     }
   }
 
-  const ranked = rankTargets(ns, all, taken, pservSet);
-  let idx = 0;
+  const freePool = pool.filter(x => !claimed.has(x.h));
+  if (!freePool.length) {
+    ns.print(`fleets ${batchedTargets.size} running | all ${pool.length} hosts assigned`);
+    return;
+  }
+  freePool.sort((a, b) => usable(ns, b) - usable(ns, a));    // biggest hosts first
+  const totalFree = freePool.reduce((sum, x) => sum + usable(ns, x), 0);
+
+  const ranked = rankTargets(ns, all, batchedTargets, pservSet);   // skip already-batched targets
+  let pi = 0;
   const launched = [];
-  // Home first: it's the biggest, best-cored host, so it earns the #1 target.
-  const hosts = ["home", ...pservs];
-  for (const host of hosts) {
-    if (busyHosts.has(host)) continue;
-    if (idx >= ranked.length) break;              // no unclaimed targets left right now
-    const target = ranked[idx++];
-    ns.scriptKill(WORKER, host);                  // clear any leftover fallback worker so it can't collide
-    if (host !== "home") ns.scp(FILES, host);     // home already has the files (commander runs there)
-    const reserve = host === "home" ? HOME_RESERVE_GB : 0;   // leave room for commander + contract-solver on home
-    if (ns.exec(BATCHER, host, 1, target, hackFraction, "quiet", reserve)) {
-      taken.add(target);
-      launched.push(`${host}->${target}`);
+  for (const target of ranked) {
+    if (pi >= freePool.length) break;
+    // Cap each fleet's RAM so no single target eats the pool — keeps several good
+    // targets served, and diversifies against any one target desyncing at once.
+    const need = Math.min(saturationRam(ns, target, hackFraction), totalFree * MAX_FLEET_SHARE);
+    const fleet = [];
+    let got = 0;
+    while (pi < freePool.length && got < need) {
+      const host = freePool[pi++];
+      fleet.push(host);
+      got += usable(ns, host);
     }
+    if (!fleet.length) break;
+
+    for (const { h } of fleet) {
+      ns.scriptKill(WORKER, h);                 // clear any leftover fallback worker (no collisions)
+      if (h !== "home") ns.scp(FILES, h);       // stage fleet-batcher + workers
+    }
+    // Run the controller on the fleet's BIGGEST host (fleet is built biggest-first,
+    // so fleet[0]) — guarantees room for the controller's own ~20GB, even for a
+    // fleet made entirely of small world servers.
+    const ctrl = fleet[0].h;
+    const cfg = JSON.stringify({ target, hosts: fleet, hf: hackFraction });
+    if (ns.exec(FLEET, ctrl, 1, cfg)) launched.push(`${target}x${fleet.length}h`);
   }
 
-  const idle = hosts.filter(h => !busyHosts.has(h)).length - launched.length;
-  ns.print(`hosts ${hosts.length} (home + ${pservs.length} cloud) | ` +
-           `batchers ${busyHosts.size + launched.length} running` +
-           (launched.length ? `, +${launched.length} new (${launched.join(", ")})` : "") +
-           (idle > 0 ? ` | ${idle} idle, no free targets` : ""));
+  ns.print(`fleets ${batchedTargets.size + launched.length} | hosts ${pool.length} (home + ${pservs.length} cloud + ${worldHosts.length} world)` +
+           (launched.length ? ` | +${launched.length}: ${launched.join(", ")}` : ""));
+}
+
+function usable(ns, x) { return Math.max(0, ns.getServerMaxRam(x.h) - x.r); }
+
+/** Roughly how much fleet RAM a target can put to work: one batch's RAM times how
+ *  many batches fit in a weaken-time pipe. Sizes fleets; approximate is fine
+ *  because each fleet-batcher also self-limits on RAM. */
+function saturationRam(ns, target, hackFraction) {
+  const f = ns.formulas.hacking;
+  const s = ns.getServer(target);
+  const p = ns.getPlayer();
+  s.hackDifficulty = s.minDifficulty;
+  s.moneyAvailable = s.moneyMax;
+
+  const perThread = f.hackPercent(s, p);
+  if (perThread <= 0) return Infinity;
+  const hackThreads = Math.max(1, Math.floor(hackFraction / perThread));
+  const stolen = Math.min(0.99, perThread * hackThreads);
+  s.moneyAvailable = s.moneyMax * (1 - stolen);
+  const growThreads = Math.max(1, Math.ceil(f.growThreads(s, p, s.moneyMax, 1) * 1.05));
+  const w1 = Math.ceil(hackThreads * SEC_HACK / SEC_WEAKEN);
+  const w2 = Math.ceil(growThreads * SEC_GROW / SEC_WEAKEN);
+  const batchRam = hackThreads * ns.getScriptRam(HACK) + growThreads * ns.getScriptRam(GROW)
+                 + (w1 + w2) * ns.getScriptRam(WEAKEN);
+  s.moneyAvailable = s.moneyMax;
+  const concurrent = Math.max(1, Math.ceil(f.weakenTime(s, p) / BATCH_GAP));
+  return batchRam * concurrent;
+}
+
+/** Drain the stats port into the fleetStats map (latest snapshot per target). */
+function drainStats(ns, fleetStats) {
+  try {
+    for (;;) {
+      const raw = ns.readPort(STATS_PORT);
+      if (raw === "NULL PORT DATA") break;
+      const s = JSON.parse(raw);
+      fleetStats.set(s.target, s);
+    }
+  } catch { /* ignore malformed stats */ }
+}
+
+let _lastIncome = 0, _lastT = 0, _incomeWarned = false, _startIncome = null;
+
+/** Short currency-ish formatting, robust to ns.formatNumber being absent. */
+function fmt(ns, n) {
+  if (!Number.isFinite(n)) return "0";
+  if (typeof ns.formatNumber === "function") { try { return ns.formatNumber(n); } catch { /* fall through */ } }
+  const a = Math.abs(n);
+  for (const [v, s] of [[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]]) if (a >= v) return (n / v).toFixed(2) + s;
+  return n.toFixed(0);
+}
+
+/** One-line earnings summary: total hacked $, rate, and best/worst fleet.
+ *  Written so it can NEVER throw — it always prints a line. */
+function printSummary(ns, fleetStats) {
+  const entries = [...fleetStats.values()];
+
+  // Prefer the game's real hacking income; if that call isn't available in this
+  // version, fall back to summing the fleets' own estimates (and say so once).
+  let income;
+  try {
+    income = ns.getMoneySources().sinceInstall.hacking;
+  } catch (e) {
+    income = entries.reduce((sum, x) => sum + (x.estEarned || 0), 0);
+    if (!_incomeWarned) { ns.print(`note: getMoneySources unavailable (${e}) — using summed fleet estimates`); _incomeWarned = true; }
+  }
+
+  const nowT = Date.now();
+  const rate = _lastT ? (income - _lastIncome) / Math.max(1, (nowT - _lastT) / 1000) : 0;
+  _lastIncome = income; _lastT = nowT;
+  if (_startIncome === null) _startIncome = income;   // baseline at commander start = only count THIS run
+
+  const head = `hacked $${fmt(ns, income - _startIncome)} this run (~$${fmt(ns, rate)}/s)`;
+  if (!entries.length) { ns.print(`${head} | fleets warming up`); return; }
+  let top = entries[0], low = entries[0];
+  for (const x of entries) {
+    if (x.estEarned > top.estEarned) top = x;
+    if (x.estEarned < low.estEarned) low = x;
+  }
+  ns.print(`${head} | ${entries.length} fleets | top ${top.target} ~$${fmt(ns, top.estEarned)} | low ${low.target} ~$${fmt(ns, low.estEarned)}`);
 }
 
 /** Rank rooted, in-level, reliable targets by a $/sec proxy at prepped state. */
