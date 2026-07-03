@@ -190,47 +190,64 @@ function rankTargets(ns, all, taken, pservSet) {
 // ---- Fallback: reactive deploy-all (used when Formulas.exe is missing) ----
 
 const WORKER = "early-hacking-template.js";
+const FALLBACK_HACK_FRACTION = 0.4;   // size each worker so one hack takes ~this much, not 100%
 
-/** Deploy the reactive worker to every rooted host (except home), all aimed
- *  at the single best target we can pick without Formulas. Idempotent: skips
- *  any host already running the worker. */
+/** Spread reactive workers across the top targets, each RIGHT-SIZED so a single
+ *  hack steals only ~FALLBACK_HACK_FRACTION of its server. This avoids the
+ *  over-hack death spiral, where one giant instance drains a server to zero,
+ *  spikes its security, and then burns an hour weakening/growing back — earning
+ *  nothing. Packs each host with several instances on DIFFERENT targets so big
+ *  machines (like a multi-TB home) actually get used instead of coma-ing one
+ *  server. Idempotent: skips any host already staffed. */
 function deployReactive(ns, all) {
-  const target = pickTargetSimple(ns, all);
-  if (!target) { ns.print("fallback: no rooted, in-level target yet."); return; }
+  const targets = pickTopTargets(ns, all, 20);
+  if (!targets.length) { ns.print("fallback: no rooted, in-level target yet."); return; }
 
-  let deployed = 0;
+  const workerRam = ns.getScriptRam(WORKER);
+  let ti = 0, uid = 0, deployed = 0;
   const hosts = new Set([...all, ...ns.cloud.getServerNames(), "home"]);
+
   for (const host of hosts) {
     if (!ns.hasRootAccess(host)) continue;
     const maxRam = ns.getServerMaxRam(host);
     if (maxRam === 0) continue;
-    if (ns.ps(host).some(p => p.filename === WORKER)) continue;  // already working
+    if (ns.ps(host).some(p => p.filename === WORKER)) continue;  // already staffed
 
     ns.scp(WORKER, host);
-    // On home, hold back a reserve so commander (which runs here) and your own
-    // tools always have room. Everywhere else, use all free RAM.
+    // On home, hold back a reserve for commander + your own tools.
     const reserve = host === "home" ? HOME_RESERVE_GB : 0;
-    const free = maxRam - ns.getServerUsedRam(host) - reserve;
-    const threads = Math.floor(free / ns.getScriptRam(WORKER, host));
-    if (threads > 0) { ns.exec(WORKER, host, threads, target); deployed++; }
+    let free = maxRam - ns.getServerUsedRam(host) - reserve;
+
+    // Fill the host with right-sized instances, rotating through the targets.
+    while (free >= workerRam) {
+      const target = targets[ti++ % targets.length];
+      const capacity = Math.floor(free / workerRam);
+      const perThread = ns.hackAnalyze(target);       // % stolen per thread (no Formulas needed)
+      let threads = perThread > 0 ? Math.ceil(FALLBACK_HACK_FRACTION / perThread) : capacity;
+      threads = Math.max(1, Math.min(threads, capacity));
+      const pid = ns.exec(WORKER, host, threads, target, uid++);  // uid keeps each instance's args unique
+      if (!pid) break;
+      free -= threads * workerRam;
+      deployed++;
+    }
   }
-  ns.print(`fallback deploy-all -> ${target}: deployed on ${deployed} new host(s).`);
+  if (deployed > 0)
+    ns.print(`fallback: deployed ${deployed} right-sized workers across up to ${targets.length} targets.`);
 }
 
-/** Best target without Formulas: highest money-per-security among rooted,
- *  in-level servers. A simple, robust early-game heuristic. */
-function pickTargetSimple(ns, all) {
+/** Top N rooted, in-level, money-bearing targets, biggest money pool first. */
+function pickTopTargets(ns, all, n) {
   const level = ns.getHackingLevel();
-  let best = null, bestScore = 0;
+  const scored = [];
   for (const name of all) {
     if (!ns.hasRootAccess(name)) continue;
     const maxMoney = ns.getServerMaxMoney(name);
     if (maxMoney <= 0) continue;
     if (ns.getServerRequiredHackingLevel(name) > level) continue;
-    const score = maxMoney / ns.getServerMinSecurityLevel(name);
-    if (score > bestScore) { bestScore = score; best = name; }
+    scored.push({ name, maxMoney });
   }
-  return best;
+  scored.sort((a, b) => b.maxMoney - a.maxMoney);
+  return scored.slice(0, n).map(x => x.name);
 }
 
 /** Smallest power of two >= n. */
