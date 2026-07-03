@@ -102,6 +102,7 @@ and it rolls your smaller servers up to the new size automatically.
 2. Buys one cloud server if you can afford it (or upgrades your smallest one once you're at the server limit).
 3. Ranks the servers you can hack by profitability.
 4. Makes sure your compute is aimed at the best targets.
+5. Finds and solves **coding contracts** across the network — free money and faction reputation — unless you pass `--no-auto-solves`.
 
 It runs in one of two modes, chosen automatically:
 
@@ -128,16 +129,18 @@ It runs in one of two modes, chosen automatically:
 | **hack.js / grow.js / weaken.js** | Tiny one-line workers. A batch is built from these. |
 | **early-hacking-template.js** | The reactive worker used by fallback mode. Fine on its own for a beginner. |
 | **purchase-servers.js** | Standalone "buy a fleet of servers" script. The commander does this too. |
+| **contract-finder.js** | Finds coding contracts network-wide and auto-solves the ~22 types it knows (never guesses blind). The commander runs it automatically; run it yourself with `--auto-solve`, or list-only with no flags. |
 | **formulas-api-reference.md** | Notes on Bitburner's Formulas API — signatures, gotchas, examples. |
 
 ---
 
 ## Tuning
 
-- `run commander.js [serverRam] [hackFraction]`
+- `run commander.js [serverRam] [hackFraction] [--no-auto-solves]`
   - `serverRam` — GB per cloud server to buy (default 512). It's a *default*, not a floor — pass a smaller number when you're broke.
   - `hackFraction` — how much of a server's money each batch steals (default 0.10). Smaller = smoother, more batches in flight.
-- In `commander.js`: `HOME_RESERVE_GB` reserves RAM on `home` so the commander and your own scripts always have room.
+  - `--no-auto-solves` — stop the commander from auto-solving coding contracts, so you can tackle them by hand.
+- In `commander.js`: `HOME_RESERVE_GB` reserves RAM on `home` so the commander and your own scripts always have room; `CONTRACT_EVERY` sets how often it scans for contracts.
 - In `batcher-pipe.js`: `SPACER` (gap between operations landing) and `BATCH_GAP` (gap between batch launches). Tighter = more throughput, less margin for timing jitter.
 
 ---

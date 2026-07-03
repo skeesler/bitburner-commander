@@ -2,7 +2,7 @@
  *
  *  COMMANDER — the self-running orchestrator that ties the whole rig together.
  *
- *      run commander.js [buyRam] [hackFraction]
+ *      run commander.js [buyRam] [hackFraction] [--no-auto-solves]
  *
  *  Every TICK it:
  *    1. Roots every server it can with your owned port crackers.
@@ -11,28 +11,35 @@
  *    3. Ranks all rooted, in-level targets by profitability (via Formulas).
  *    4. Ensures each purchased server is running a pipe batcher against its own
  *       DISTINCT top target — launching only where one isn't already running.
+ *    5. Finds and auto-solves coding contracts (money + faction rep) network-wide,
+ *       unless you pass --no-auto-solves.
  *
  *  It is idempotent: it discovers current assignments by reading the args of
  *  running batchers, so re-running it (or a game reload) just refills gaps.
  *
- *  Requires Formulas.exe on home. Runs on home by default; if home is too
+ *  Uses Formulas.exe for high-performance batching; without it, falls back to a
+ *  reactive deploy-all automatically. Runs on home by default; if home is too
  *  small to host it, run it on one of your purchased servers instead.
  */
 
 const BATCHER = "batcher-pipe.js";
 const FILES = [BATCHER, "hack.js", "grow.js", "weaken.js"];
+const CONTRACT_FINDER = "contract-finder.js";
 const DEFAULT_RAM = 512;     // used when no size arg is given; NOT a hard floor
 const HOME_RESERVE_GB = 64;  // keep this much free on home for commander itself + your own scripts
 const TICK = 10000;          // control-loop interval, ms
+const CONTRACT_EVERY = 6;    // run the contract solver every N ticks (~once a minute)
 const MIN_CHANCE = 0.5;      // skip targets whose prepped hack chance is below this
 
 export async function main(ns) {
   ns.disableLog("ALL");
-  // 512 is the DEFAULT, not a floor — an explicit smaller arg is honored, so you
-  // can spam cheap servers to climb out of a post-reset trough, then re-run with
-  // a bigger size later to let the auto-upgrade roll them up.
-  const buyRam = ceilPow2(Number(ns.args[0]) || DEFAULT_RAM);
-  const hackFraction = ns.args[1] ?? 0.10;   // conservative default: small batches pipe well
+  const flags = ns.flags([["no-auto-solves", false]]);
+  // buyRam: 512 is the DEFAULT, not a floor — an explicit smaller arg is honored,
+  // so you can spam cheap servers to climb out of a post-reset trough, then re-run
+  // with a bigger size later to let the auto-upgrade roll them up.
+  const buyRam = ceilPow2(Number(flags._[0]) || DEFAULT_RAM);
+  const hackFraction = flags._[1] !== undefined ? Number(flags._[1]) : 0.10;
+  const autoSolve = !flags["no-auto-solves"];
 
   // Without Formulas.exe (e.g. fresh off an augmentation install) we can't
   // batch, so fall back to the reactive deploy-all until it's re-bought.
@@ -43,15 +50,36 @@ export async function main(ns) {
   ns.print(hasFormulas
     ? `Commander online — BATCHING. Buying ${buyRam}GB servers, ${Math.round(hackFraction * 100)}%/batch.`
     : `Commander online — FALLBACK (no Formulas.exe): reactive deploy-all. Re-run me once you re-buy Formulas.`);
+  ns.print(`Coding-contract auto-solve: ${autoSolve ? "ON" : "OFF (--no-auto-solves)"}`);
 
+  let tick = 0, lastRooted = -1;
   while (true) {
     const all = scanAll(ns);
     rootAll(ns, all);
     maybeBuyServer(ns, buyRam);
     if (hasFormulas) ensureBatchers(ns, all, hackFraction);
     else deployReactive(ns, all);
+    if (autoSolve && tick % CONTRACT_EVERY === 0) solveContracts(ns);
+
+    // Report how many world servers we've rooted, whenever that count changes.
+    const pservs = new Set(ns.cloud.getServerNames());
+    const rooted = all.filter(s => !pservs.has(s) && ns.hasRootAccess(s)).length;
+    const total = all.filter(s => !pservs.has(s)).length;
+    if (rooted !== lastRooted) { ns.print(`hacked ${rooted}/${total} servers`); lastRooted = rooted; }
+
+    tick++;
     await ns.sleep(TICK);
   }
+}
+
+/** Run the contract finder/solver on home if present and not already running.
+ *  Its coding-contract API calls are RAM-heavy, so it runs as a short-lived
+ *  separate process (keeping that RAM out of commander). With --quiet it prints
+ *  only actual solves. Turn the whole thing off with commander's --no-auto-solves. */
+function solveContracts(ns) {
+  if (!ns.fileExists(CONTRACT_FINDER, "home")) return;
+  if (ns.ps("home").some(p => p.filename === CONTRACT_FINDER)) return;   // already running
+  ns.exec(CONTRACT_FINDER, "home", 1, "--auto-solve", "--quiet");
 }
 
 /** Breadth-first walk of the whole network from home. */
