@@ -2,7 +2,12 @@
  *
  *  COMMANDER — the self-running orchestrator that ties the whole rig together.
  *
- *      run commander.js [buyRam] [hackFraction] [--no-auto-solves]
+ *      run commander.js [buyRam|auto] [hackFraction] [--no-auto-solves]
+ *
+ *  buyRam defaults to AUTO: each tick it picks the "right" server size from your
+ *  cash (largest power of two whose full fleet fits your budget) and climbs the
+ *  ladder on its own as you get richer — so you never have to name a power of two.
+ *  Pass an explicit number to pin a size instead (e.g. commander.js 16).
  *
  *  Every TICK it:
  *    1. Roots every server it can with your owned port crackers.
@@ -30,7 +35,9 @@ const SEC_HACK = 0.002, SEC_GROW = 0.004, SEC_WEAKEN = 0.05;
 const BATCH_GAP = 800;         // must match fleet-batcher.js (used for saturation sizing)
 const STATS_PORT = 1;          // fleet-batchers post earnings snapshots here
 const MAX_FLEET_SHARE = 1 / 3; // no single target's fleet may exceed this share of the pool
-const DEFAULT_RAM = 512;       // used when no size arg is given; NOT a hard floor
+const DEFAULT_RAM = 512;       // only used if an explicit non-numeric size is passed
+const AUTO_MIN_RAM = 8;        // smallest size auto-mode will consider (climbing out of a trough)
+const FLEET_BUDGET = 0.5;      // auto-mode targets a size whose FULL fleet costs <= this share of cash
 const HOME_RESERVE_GB = 64;    // keep this free on home for commander + contract-solver
 const TICK = 10000;            // control-loop interval, ms
 const CONTRACT_EVERY = 6;      // run the contract solver every N ticks (~once a minute)
@@ -40,10 +47,11 @@ const MIN_CHANCE = 0.5;        // skip targets whose prepped hack chance is belo
 export async function main(ns) {
   ns.disableLog("ALL");
   const flags = ns.flags([["no-auto-solves", false]]);
-  // buyRam: 512 is the DEFAULT, not a floor — an explicit smaller arg is honored,
-  // so you can spam cheap servers to climb out of a post-reset trough, then re-run
-  // with a bigger size later to let the auto-upgrade roll them up.
-  const buyRam = ceilPow2(Number(flags._[0]) || DEFAULT_RAM);
+  // buyRam: AUTO by default (auto-size from cash each tick, climbing out of a post-reset trough
+  // on its own). An explicit number pins the size (e.g. commander.js 16 to spam cheap servers).
+  const sizeArg = flags._[0];
+  const autoSize = sizeArg === undefined || String(sizeArg).toLowerCase() === "auto";
+  const fixedRam = autoSize ? 0 : ceilPow2(Number(sizeArg) || DEFAULT_RAM);
   const hackFraction = flags._[1] !== undefined ? Number(flags._[1]) : 0.10;
   const autoSolve = !flags["no-auto-solves"];
 
@@ -53,16 +61,50 @@ export async function main(ns) {
   const hasFormulas = ns.fileExists("Formulas.exe", "home");
 
   ns.ui.openTail();
+  const sizeLabel = autoSize ? "auto-sized" : fmtRam(fixedRam);
   ns.print(hasFormulas
-    ? `Commander online — BATCHING. Buying ${buyRam}GB servers, ${Math.round(hackFraction * 100)}%/batch.`
+    ? `Commander online — BATCHING. Servers: ${sizeLabel}, ${Math.round(hackFraction * 100)}%/batch.`
     : `Commander online — FALLBACK (no Formulas.exe): reactive deploy-all. Re-run me once you re-buy Formulas.`);
   ns.print(`Coding-contract auto-solve: ${autoSolve ? "ON" : "OFF (--no-auto-solves)"}`);
 
+  // Self-reload: snapshot our own source. If the on-disk file later diverges (a fresh edit synced
+  // onto home), we're running stale code — relaunch into the new version, same args. No kill+rerun.
+  const self = ns.getScriptName();
+  const baseline = ns.read(self);
+
   let tick = 0, lastRooted = -1;
+  // Auto-size is RATCHETED so money thrashing (stock sales, income spikes) doesn't churn it:
+  //   - committedRam only ever grows — never proposes a smaller size, so no downsize churn;
+  //   - a bigger size must stay affordable for RAMP_TICKS before we adopt it (ignore blips), and
+  //     we adopt the sustained FLOOR of that window, not whatever spike happened on the last tick.
+  const RAMP_TICKS = 6; // ~60s sustained (at TICK=10s) before the target grows
+  let committedRam = 0, rampTicks = 0, rampMin = 0;
   const fleetStats = new Map();   // target -> latest earnings snapshot from its fleet-batcher
   while (true) {
+    if (ns.read(self) !== baseline && ns.read(self)) {
+      ns.print(`↻ ${self} changed on disk — reloading into the new version.`);
+      return ns.spawn(self, { threads: 1, spawnDelay: 500 }, ...ns.args);
+    }
     const all = scanAll(ns);
     rootAll(ns, all);
+    let buyRam = fixedRam;
+    if (autoSize) {
+      const target = autoBuyRam(ns);
+      const prev = committedRam;
+      if (committedRam === 0) {
+        committedRam = target;                                   // seed once (post-reset money is low → seeds low)
+      } else if (target > committedRam) {
+        rampMin = rampTicks === 0 ? target : Math.min(rampMin, target);
+        if (++rampTicks >= RAMP_TICKS) { committedRam = rampMin; rampTicks = 0; }
+      } else {
+        rampTicks = 0;                                           // dipped: reset the ramp, but never shrink the target
+      }
+      buyRam = committedRam;
+      if (committedRam !== prev) {
+        const each = ns.cloud.getServerCost(buyRam);
+        ns.print(`auto-size → ${fmtRam(buyRam)}/server (~$${fmt(ns, each)} each, ~$${fmt(ns, each * ns.cloud.getServerLimit())} full fleet)`);
+      }
+    }
     maybeBuyServer(ns, buyRam);
     if (hasFormulas) ensureFleets(ns, all, hackFraction);
     else deployReactive(ns, all);
@@ -354,6 +396,7 @@ function rankTargets(ns, all, taken, pservSet) {
 
 const WORKER = "early-hacking-template.js";
 const FALLBACK_HACK_FRACTION = 0.4;   // size each worker so one hack takes ~this much, not 100%
+const FALLBACK_MIN_CHANCE = 0.5;      // skip targets we can't reliably hit yet (mirrors MIN_CHANCE)
 
 /** Spread reactive workers across the top targets, each RIGHT-SIZED so a single
  *  hack steals only ~FALLBACK_HACK_FRACTION of its server. This avoids the
@@ -364,11 +407,30 @@ const FALLBACK_HACK_FRACTION = 0.4;   // size each worker so one hack takes ~thi
  *  server. Idempotent: skips any host already staffed. */
 function deployReactive(ns, all) {
   const targets = pickTopTargets(ns, all, 20);
-  if (!targets.length) { ns.print("fallback: no rooted, in-level target yet."); return; }
+  if (!targets.length) { ns.print("fallback: no reliable, in-level target yet."); return; }
+
+  // Cap instances per target so their combined steal stays under ~90%. Without
+  // this, a huge home stacks many instances onto the single best target and
+  // drains it to zero (the over-hack spiral) while starving everything else.
+  // Derived from the hack fraction so it stays consistent if you tune it.
+  const perTargetCap = Math.max(1, Math.floor(0.9 / FALLBACK_HACK_FRACTION));
 
   const workerRam = ns.getScriptRam(WORKER);
-  let ti = 0, uid = 0, deployed = 0;
-  const hosts = new Set([...all, ...ns.cloud.getServerNames(), "home"]);
+  let uid = 0, deployed = 0, idle = 0;
+  // Biggest hosts first, so home (most RAM, and its cores boost grow/weaken) gets
+  // first pick of the best targets instead of whatever budget is left over.
+  const hosts = [...new Set([...all, ...ns.cloud.getServerNames(), "home"])]
+    .sort((a, b) => ns.getServerMaxRam(b) - ns.getServerMaxRam(a));
+
+  // Seed the per-target counts from workers ALREADY running anywhere, so the cap
+  // is a GLOBAL, idempotent limit. Filling across ticks (home this tick, the rest
+  // next tick) or re-running the commander then never stacks past perTargetCap.
+  const assigned = new Map(targets.map(t => [t, 0]));
+  for (const host of hosts) {
+    for (const p of ns.ps(host)) {
+      if (p.filename === WORKER && assigned.has(p.args[0])) assigned.set(p.args[0], assigned.get(p.args[0]) + 1);
+    }
+  }
 
   for (const host of hosts) {
     if (!ns.hasRootAccess(host)) continue;
@@ -381,24 +443,35 @@ function deployReactive(ns, all) {
     const reserve = host === "home" ? HOME_RESERVE_GB : 0;
     let free = maxRam - ns.getServerUsedRam(host) - reserve;
 
-    // Fill the host with right-sized instances, rotating through the targets.
     while (free >= workerRam) {
-      const target = targets[ti++ % targets.length];
+      // Best-scored target that still has budget. Once every target is capped
+      // we're saturated — bank the leftover RAM rather than pile on and over-hack.
+      const target = targets.find(t => assigned.get(t) < perTargetCap);
+      if (!target) { idle += free; break; }
       const capacity = Math.floor(free / workerRam);
       const perThread = ns.hackAnalyze(target);       // % stolen per thread (no Formulas needed)
       let threads = perThread > 0 ? Math.ceil(FALLBACK_HACK_FRACTION / perThread) : capacity;
       threads = Math.max(1, Math.min(threads, capacity));
       const pid = ns.exec(WORKER, host, threads, target, uid++);  // uid keeps each instance's args unique
       if (!pid) break;
+      assigned.set(target, assigned.get(target) + 1);
       free -= threads * workerRam;
       deployed++;
     }
   }
-  if (deployed > 0)
-    ns.print(`fallback: deployed ${deployed} right-sized workers across up to ${targets.length} targets.`);
+
+  if (deployed > 0) {
+    const used = [...assigned.values()].filter(v => v > 0).length;
+    let msg = `fallback: deployed ${deployed} workers across ${used} reliable target(s) (<=${perTargetCap}/target).`;
+    if (idle > workerRam * 4) msg += ` ~${(idle / 1024).toFixed(1)}TB idle — fallback is saturated; Formulas.exe ($5b) unlocks the rest via real batching.`;
+    ns.print(msg);
+  }
 }
 
-/** Top N rooted, in-level, money-bearing targets, biggest money pool first. */
+/** Top N rooted, in-level, RELIABLE targets ranked by a capturable-$/sec proxy.
+ *  Uses hackAnalyzeChance/getHackTime (no Formulas needed), so unlike a raw
+ *  max-money sort it won't chase rich servers it can't actually hit — the trap
+ *  that stalls income the moment crackers unlock the big boxes. */
 function pickTopTargets(ns, all, n) {
   const level = ns.getHackingLevel();
   const scored = [];
@@ -407,9 +480,13 @@ function pickTopTargets(ns, all, n) {
     const maxMoney = ns.getServerMaxMoney(name);
     if (maxMoney <= 0) continue;
     if (ns.getServerRequiredHackingLevel(name) > level) continue;
-    scored.push({ name, maxMoney });
+    const chance = ns.hackAnalyzeChance(name);
+    if (chance < FALLBACK_MIN_CHANCE) continue;              // can't reliably hit it yet — skip
+    const hackTime = ns.getHackTime(name) / 1000;            // seconds
+    const score = (maxMoney * chance) / Math.max(1, hackTime);   // capturable $/sec proxy
+    scored.push({ name, score });
   }
-  scored.sort((a, b) => b.maxMoney - a.maxMoney);
+  scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, n).map(x => x.name);
 }
 
@@ -418,4 +495,30 @@ function ceilPow2(n) {
   let pw = 1;
   while (pw < n) pw *= 2;
   return pw;
+}
+
+/** Best-guess "right" purchased-server size from current cash: the largest power of two whose
+ *  FULL fleet (every slot) costs at most FLEET_BUDGET of your money. Climbs the power-of-two
+ *  ladder on its own as you get richer. When you're too broke for even a min-size fleet (e.g.
+ *  fresh post-reset), it falls back to the biggest SINGLE server you can afford, so it still
+ *  buys something and climbs out. Clamped to the game's max purchasable RAM (getRamLimit). */
+function autoBuyRam(ns) {
+  const money = ns.getServerMoneyAvailable("home");
+  const limit = ns.cloud.getServerLimit();
+  const maxRam = ns.cloud.getRamLimit();
+  let fleetSize = 0;    // largest pow2 whose FULL fleet fits the budget
+  let singleSize = 0;   // largest pow2 whose ONE server is affordable (trough fallback)
+  for (let ram = AUTO_MIN_RAM; ram <= maxRam; ram *= 2) {
+    const cost = ns.cloud.getServerCost(ram);
+    if (cost <= money) singleSize = ram;
+    if (cost * limit <= money * FLEET_BUDGET) fleetSize = ram;
+  }
+  return fleetSize || singleSize || AUTO_MIN_RAM;
+}
+
+/** RAM in human units (GB/TB/PB) so you never have to read a raw power of two. */
+function fmtRam(gb) {
+  if (gb >= 1048576) return (gb / 1048576) + "PB";
+  if (gb >= 1024) return (gb / 1024) + "TB";
+  return gb + "GB";
 }
