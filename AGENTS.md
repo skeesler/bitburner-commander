@@ -15,6 +15,11 @@ scripts, co-written by Sara and an assistant across sessions. Read this before w
   (`github.com/bitburner-official/bitburner-src`, `markdown/` and
   `src/Documentation/doc/en/`) rather than guessing. `formulas-api-reference.md` here
   captures the formulas namespace we've already pulled.
+- **The running game is the ONLY source of truth for the API — not even the official dev repo.**
+  The `bitburner-src` markdown runs *ahead* of the 3.0.1 release: we built a whole "freeze-to-crack"
+  plan on `ns.dnet.freezeServer` from the dev docs, and it doesn't exist in 3.0.1 (`is not a function`).
+  Before designing around any `ns.dnet.*` method, confirm it's real — `run dnet-api.js` dumps the actual
+  22-method surface. Trust the in-game `ns.` autocomplete (and a live probe) over any doc or chatbot.
 
 ## What's here
 
@@ -42,3 +47,14 @@ darknet code. API surface re-derived from the official 3.0 docs, now being confi
 - Scripts target `home` as the primary host and are meant to be copied there wholesale.
 - Prefer one self-managing entry point (like `commander.js`) over many manual scripts.
 - Keep the human-readable status/earnings output — Sara likes watching runs.
+- **Before committing, check what you changed.** `node --check <file>` on every edited script (parse
+  errors otherwise only surface in-game), and keep `node dnet-constraints.test.mjs` green — it's the
+  solver's spec; add a test when you add a puzzle-model parser. Both run under plain Node.
+- **RAM is charged for every `ns.*` a script's imports *mention*, even uncalled.** The darknet crawler
+  sits on a knife-edge against 16GB nodes, so check `ns.getScriptRam` (or `mem` in-game) before adding an
+  `ns` call to it or a module it imports — a stray `ns.rm`/`ns.heartbleed` can strand its reach.
+- **Model-hunting loop (darknet).** A `FAILED … (Model)` trace is the spec: read the `heartbleed data`,
+  name the grammar, add a parser in `dnet-constraints.js` (static hints) or a strategy in `dnet-solve.js`
+  (adaptive/feedback), test, commit. Run crawls with `--suppress-info` to surface only new models.
+- **Commits/push.** Sara commits at her own discretion; end messages with the `Co-Authored-By: Claude …`
+  trailer. Push only when asked.
