@@ -85,6 +85,10 @@ That's all. Everything runs from your `home` server.
    ```
 3. A log window pops up. That's it — it now roots servers, buys servers, and hacks.
 
+> Tired of copy-pasting files into the game one by one? **`SYNC-SETUP.md`** walks through
+> Bitburner's Remote File API — a ~10-minute, one-time setup so saving a file in your editor
+> pushes it straight onto the game's `home`.
+
 Low on cash and it's not buying servers? Tell it to buy cheaper ones:
 ```
 run commander.js 64        # buy 64GB servers instead of the 512GB default
@@ -136,8 +140,41 @@ It runs in one of two modes, chosen automatically:
 | **early-hacking-template.js** | The reactive worker used by fallback mode. Fine on its own for a beginner. |
 | **purchase-servers.js** | Standalone "buy a fleet of servers" script. The commander does this too. |
 | **contract-finder.js** | Finds coding contracts network-wide and auto-solves the ~22 types it knows (never guesses blind). The commander runs it automatically; run it yourself with `--auto-solve`, or list-only with no flags. |
-| **reset-scripts.js** | Emergency stop / clean slate — kills every script on every server (except itself). Run it before a major version hand-off, or to halt everything fast. |
+| **reset-scripts.js** | Surgical reset — kills only the commander's own script family (its controllers + workers) across home + cloud + world, sparing everything else (notably `stock-trader.js`). Run before a version hand-off, or to halt the rig fast. |
+| **stock-trader.js** | 4S stock-market bot (long-only): buys strong-forecast stocks, sells on flips, and honors a `keepLiquid` cash reserve. A separate income stream that survives a rig reset. |
+| **liquidate.js** | One-shot "sell everything, go to cash" for the stock portfolio. Pair with `kill stock-trader.js`. |
+| **traceroute.js** | Prints the `connect` path from `home` to any server (case-insensitive, with a "did you mean"). Handy for reaching backdoor targets after the per-install network reshuffle. |
 | **formulas-api-reference.md** | Notes on Bitburner's Formulas API — signatures, gotchas, examples. |
+
+---
+
+## The DarkNet (advanced frontier)
+
+Bitburner v3 added the **DarkNet** (`ns.dnet`) — a procedurally-generated, constantly-mutating
+network living alongside the static one, where every server is a little password *puzzle* and the
+whole map reshuffles every few seconds. This repo includes a separate rig for automating it
+(`dnet-*.js`): autonomous crawlers that replicate outward, crack each node's auth puzzle, harvest
+loot, and coordinate through a durable shared database on `home` — because, unlike the light net,
+you **can't** orchestrate the darknet from a single vantage point.
+
+It's a different beast with its own docs — **start with the runbook**:
+
+- **`dnet-runbook.md`** — the commands and when to run them.
+- **`darknet-design.md`** — the *why*: architecture, the puzzle-model zoo, and field findings.
+
+| File | What it is |
+|---|---|
+| **dnet-commander.js** | Home-side owner of the darknet DB: drains crawler reports into it, prints the map + password book, and can self-drive the crawl → loot → scout pipeline (`loop auto`). |
+| **dnet-crawl.js** | The replicating cracker — probes a node's neighbors, cracks each password, and spiders onward. |
+| **dnet-solve.js** | The password solver: a constraint model plus per-model strategies (defaults, captcha, anagram, base-conversion, buffer-overflow, Mastermind, …). |
+| **dnet-constraints.js** | Pure, unit-tested constraint model behind the solver — `node dnet-constraints.test.mjs`. |
+| **dnet-loot.js / dnet-scout.js** | Light passes: harvest caches/intel, and map the deep region using already-known passwords. |
+| **dnet-db.js / dnet-db-drain.js** | The durable shared database (single-writer) and its inbox drain. |
+| **dnet-step.js** | The door: push a darknet script onto a directly-connected node and run it there. |
+| **dnet-recon.js / dnet-hbprobe.js / dnet-api.js** | Throwaway probes for learning the live API and response shapes. |
+
+Append `--suppress-info` to any crawl (or `dnet-commander.js loop auto`) to quiet the routine chatter
+and see only genuinely-new puzzle models.
 
 ---
 
