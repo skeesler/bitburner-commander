@@ -132,6 +132,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 
 	let tries = 0;
 	let stop = null; // "unreachable" | "ratelimited" | "error"
+	let froze = "not-attempted"; // freezeServer outcome — surfaced on a 351 to tell a race from a structural block
 	const tried = new Set(); // never spend a rate-limited guess on a duplicate (static + adaptive overlap)
 	const trace = []; // per-attempt {guess, code, message, data, ms} — dumped on FAILED so a new/odd
 	                  // model is self-diagnosing (esp. TIMING models: watch `ms` track correctness).
@@ -181,8 +182,10 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 		if (det.raw.isStationary === false) {
 			try {
 				const fr = await d.freezeServer(host);
-				ns.print(`  ❄ froze ${host} to hold it for the solve (${(fr && fr.message) || "ok"})`);
+				froze = fr ? `code ${fr.code ?? "?"} ${fr.message ?? ""}`.trim() : "no-result";
+				ns.print(`  ❄ froze ${host} → ${froze}`);
 			} catch (e) {
+				froze = `ERR ${e}`;
 				ns.print(`  freezeServer(${host}) failed: ${e} — solving unpinned, may lose it to mutation`);
 			}
 		}
@@ -238,7 +241,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 		}
 	}
 
-	if (stop === "unreachable") ns.tprint(`SKIP ${host} (${det.model}): direct connection required (351)`);
+	if (stop === "unreachable") ns.tprint(`SKIP ${host} (${det.model}): direct connection required (351)  [stationary=${det.raw.isStationary}, freeze=${froze}]`);
 	else if (stop === "ratelimited") ns.tprint(`BACKOFF ${host} (${det.model}): rate-limited (503) — stopped after ${tries}`);
 	else if (stop === "error") ns.tprint(`SKIP ${host} (${det.model}): authenticate error (offline/migrated?)`);
 	else ns.tprint(`FAILED ${host} (${det.model}) in ${tries} tries — possible NEW model:\n${JSON.stringify(det.raw, null, 2)}\nattempts (watch data + ms):\n${JSON.stringify(trace.slice(-8), null, 2)}`);
