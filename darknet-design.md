@@ -95,7 +95,7 @@ Archetypes seen (2026-07-04):
 | `FreshInstall_1.0` | Default password | hint "I never changed the password" | try defaults → `admin` |
 | `DeskMemo_3.1` | Literal leak | hint "The PIN is 77" | parse answer from hint text → `77` |
 | `CloudBlare(tm)` | Captcha | `data: 3(8~6`, numeric len 3 | strip non-format chars → `386` |
-| `NIL` | Mastermind | **heartbleed** `data: yesn't,yesn't,…` (len == pw) | positional broadcast (freeze first — see latency note) |
+| `NIL` | Mastermind | **heartbleed** `data: yesn't,yesn't,…` (len == pw) | positional broadcast (stationary nodes; mobile ones mutate out mid-solve — see latency note) |
 | `PHP 5.4` | Anagram | hint "I accidentally **sorted** the password: 346" | try permutations of those digits (≤3!=6) |
 | `Laika4` | Trivia | hint "It's the dog's name" (alphabetic) | *unsolved — needs a knowledge/wordlist strategy* |
 | `Factori-Os` | Math property | hint "The password is divisible by K" | multiples of K (K=1 = troll, whole space → brute) |
@@ -158,15 +158,16 @@ also a cross-node intel vector; run `harvestCandidates` + the cred/hint regexes 
 early and constrain: one seed guess → bleed → constrain → guess the *narrowed* set, not exhaust the pool
 first.
 
-### Latency vs. mutation → freezeServer is load-bearing (2026-07-05)
+### Latency vs. mutation → mobile high-difficulty NILs can't be pinned (2026-07-05)
 
-Authenticate on these hard nodes is **slow: ~8–11s per guess** (measured on both `neo%grid:2642` and
-`smart_doorbell`). A full numeric broadcast is up to ~10 guesses → **~100s**, but the net mutates every
-**~12s** and these nodes are `isStationary: false` — so an unpinned broadcast **cannot finish before the
-node migrates out from under it**. Fix: `freezeServer(host)` (2GB, pre-auth, takes a neighbor's hostname)
-pins it in place for the duration. It permanently strips the node's RAM/loot, but we only `authenticate`
-+ `heartbleed` it from the neighbor, so that costs nothing here — and without it we crack *zero* of these.
-Decision (approved): **freeze-to-crack** any mobile node that reaches the adaptive phase.
+Authenticate on hard nodes is **slow: ~8–11s per guess** (measured on `neo%grid:2642` and
+`smart_doorbell`); easy nodes answer in ~1s. A full numeric broadcast is up to ~10 guesses → **~100s**,
+but the net mutates every **~12s** and these nodes are `isStationary: false` — so the broadcast **cannot
+finish before the node migrates out** (→ 351). We hoped `freezeServer` would pin it; it doesn't exist in
+3.0.1 (see "Stasis + the REAL API surface") and nothing else pins an *uncracked* target. So: solve the
+STATIONARY NILs (no mutation risk); on mobile ones, attempt unpinned and bail on the 351 — the try still
+pays charisma XP. Charisma grinding speeds auth over time and should eventually shrink the broadcast under
+the mutation window (the passive fix).
 
 ### Solver reads the channel (built 2026-07-05, `dnet-solve.js`)
 
@@ -232,37 +233,41 @@ the pipeline stalls. Full map block also now renders only on a merge (not on bar
 - **Reach budgeting** — replicate-and-lose-nodes cheaply vs. spend a scarce stasis link to
   pin one. Stasis turns a fragile deep node into a stable remote-exec anchor.
 
-## Stasis, freeze, and the full API surface (confirmed from official 3.0 markdown, 2026-07-05)
+## Stasis + the REAL API surface (game-verified in 3.0.1, 2026-07-05)
 
-Two ways to pin a node against the constant mutation — verified signatures, correcting our earlier guess
-(we had written `setStasisLink(host)`, which is wrong):
+**Correction — trust the game, not the dev docs.** An earlier pass here documented `freezeServer` and a
+"24-method" surface straight from the dev-branch markdown. `run dnet-api.js` against the actual 3.0.1
+build shows **22 methods, and `freezeServer` is NOT one of them** (`d.freezeServer is not a function`) —
+the dev docs are ahead of the release. The 22 that exist:
 
-- **`setStasisLink(shouldLink = true): Promise<DarknetResult>`** — acts on the **script's CURRENT
-  server** (a boolean, not a hostname; the pinner must be *standing on* the node). Grants it (1) **remote
-  access** — `connectToSession`/`exec` (and terminal `connect`) reach it from anywhere, bypassing the
-  direct-connection rule — and (2) **stabilization** — it stops moving/going offline. **12 GB RAM** per
-  calling script; **globally capped** (`getStasisLinkLimit()`, raised by deep-darknet augments). Only the
-  linked node is protected, not its neighbors. This is the deep-reach anchor: a light pinner pins a
-  beachhead, then the commander remote-`exec`s the heavy solver onto it. The 12GB cost means the pinner
-  is its OWN lean script — never the already-overweight crawler.
+  authenticate, connectToSession, getBlockedRam, getDarknetInstability, getDepth, getServerDetails,
+  getServerRequiredCharismaLevel, getStasisLinkLimit, getStasisLinkedServers, heartbleed,
+  induceServerMigration, isDarknetServer, labradar, labreport, memoryReallocation, nextMutation,
+  openCache, phishingAttack, probe, promoteStock, setStasisLink, unleashStormSeed
 
-- **`freezeServer(host: string): DarknetResult`** — takes a **hostname** (freeze a neighbor from beside
-  it), **2 GB**, synchronous. Pins the target like stasis BUT **strips its max RAM to 0 and its XP
-  rewards — permanent, sacrificial.** The docs' stated use case is literally ours: "sacrifice a new
-  device… to make it easier to probe it for weaknesses and develop scripts against it." Ideal for a
-  model specimen we only `authenticate` + `heartbleed` from its neighbor (we never run scripts ON it, so
-  the RAM/XP loss costs nothing). Caveat: nodes *connected to* the frozen one may still move — so the node
-  we STAND on can drift. Pair them: `setStasisLink(true)` on our beachhead (stable platform) +
-  `freezeServer(target)` on the specimen (pinned) → solves both the vanishing target and deep reach.
+**Consequence: there is NO pre-auth way to pin an uncracked target.** `freezeServer(host)` — which would
+have pinned a *neighbor* by hostname — is gone. `setStasisLink(shouldLink)` acts on the **script's
+current server** only: you must already be *running on* a node to link it, i.e. already have cracked it.
+So a mobile, uncracked NIL cannot be held still while we solve it. **The freeze-to-crack plan is dead.**
 
-**The full `ns.dnet` surface is 24 methods** — we'd only catalogued ~10. Beyond the ones we use
-(`probe`, `getServerDetails`, `authenticate`, `connectToSession`, `heartbleed`, `openCache`,
-`memoryReallocation`, `getBlockedRam`, `nextMutation`, `getDepth`, `getServerRequiredCharismaLevel`,
-`isDarknetServer`, `getStasisLinkedServers`, `getStasisLinkLimit`) there are:
-`setStasisLink`, `freezeServer`, `induceServerMigration` (force a node to move), `getDarknetInstability`
-(aggression cost — we have the readout, never watched it move), `phishingAttack`, `promoteStock`,
-`labradar` + `labreport` (the Labyrinth/maze mechanic), `unleashStormSeed`. Several are whole unexplored
-mechanics — parked until we meet them in the field.
+- **`setStasisLink(shouldLink = true)`** — self-targets the current server: grants it remote access
+  (`connectToSession`/`exec` from anywhere, bypassing the direct-connection rule) + stops it moving/going
+  offline. Globally capped (`getStasisLinkLimit`). Still the **deep-REACH anchor** (pin a *cracked*
+  beachhead → commander remote-execs the heavy solver onto it), just NOT a way to hold an unsolved target.
+- **`phishingAttack()`** (2GB, runs on a darknet node) — money + **charisma** grind: phish a middle
+  manager for cash (scales with threads; rare cache). The money is pocket lint at our wealth, but the
+  **charisma** it builds is exactly the passive fix for hard/mobile NILs (faster auth, lower gates) — a
+  potential accelerator worth testing against the crawler's own auth-grind.
+- **`induceServerMigration`, `labradar`/`labreport` (maze), `promoteStock`, `unleashStormSeed`,
+  `getDarknetInstability`** — real but unexplored; parked until we meet them.
+
+**So how do we crack a mobile high-difficulty NIL?** Auth latency scales with difficulty/charisma: easy
+nodes answer in ~1s, hard NILs in ~10s. A ~10-guess broadcast on a ~10s node ≈ 100s > the ~12s mutation,
+so it migrates out mid-solve (→ 351) before we finish, and nothing can pin it. Current answer:
+(1) **stationary** NILs solve fine (no mutation risk); (2) **mobile** ones we attempt unpinned and bail
+cleanly on the 351 — the attempt still pays charisma XP; (3) **charisma grinding** speeds auth over time,
+shrinking the broadcast below the mutation window, and the crawler self-grinds, so this improves
+passively. Revisit if `induceServerMigration` or the maze (`labradar`) turns out to offer a pin.
 
 ## Charisma (self-grinding — the crawler is the engine)
 
@@ -321,8 +326,9 @@ New this layer: `alphabetic` format, empty-password ZeroLogon, and a real charis
       commander. Confirmed API + the `freezeServer` companion in "Stasis, freeze, and the full API surface".
 - [x] `dnet-hbprobe.js` + `dnet-solve.js` diagnostic — **found the feedback channel** (`heartbleed().logs[]`,
       not the auth reply; confirmed 2026-07-05 on `OpenWebAccessPoint` + `NIL`).
-- [x] `dnet-solve.js` adaptive rewrite — reads heartbleed (`bleedData`), freezes mobile nodes, dispatches
-      positional-broadcast vs fuzzy-prose. **LIVE-UNVERIFIED** (parses + 31/31 spec; freeze+broadcast not yet run in-game).
+- [x] `dnet-solve.js` adaptive rewrite — reads heartbleed (`bleedData`), dispatches positional-broadcast
+      vs fuzzy-prose, numeric brute capped at BRUTE_CAP. Freeze guarded (freezeServer absent in 3.0.1).
+      Channel confirmed live on NIL; mobile high-difficulty NILs 351 out mid-broadcast (unpinnable).
 - [ ] instability management, earnings reporting (later)
 
 ### Loot is two kinds (confirmed live 2026-07-04)
