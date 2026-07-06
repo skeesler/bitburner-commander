@@ -60,6 +60,14 @@ console.log("\nArchetypes (design-doc table) — answer must appear as a candida
 	ok("PHP 5.4 anagram → all 6 perms of 346", allPerms, JSON.stringify(c.slice(0, 6)));
 }
 
+// PHP 5.4 variant — "The PIN uses 035" (different phrasing, + bare-digit `data`) → perms of 035.
+{
+	const c = cands({ hint: "The PIN uses 035", data: "035", length: 3, format: "numeric" });
+	const allPerms = ["035", "053", "305", "350", "503", "530"].every((p) => has(c, p));
+	ok("PHP 5.4 'uses' → all 6 perms of 035", allPerms, JSON.stringify(c.slice(0, 6)));
+	ok("PHP 5.4 'uses' → every candidate is a permutation of 035", c.length > 0 && c.every((v) => [...v].sort().join("") === "035"), JSON.stringify(c));
+}
+
 // Factori-Os — "divisible by 7" → only multiples of 7 (of the right length).
 {
 	const c = cands({ hint: "The password is divisible by 7", length: 3, format: "numeric" });

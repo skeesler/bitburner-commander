@@ -96,7 +96,7 @@ Archetypes seen (2026-07-04):
 | `DeskMemo_3.1` | Literal leak | hint "The PIN is 77" | parse answer from hint text → `77` |
 | `CloudBlare(tm)` | Captcha | `data: 3(8~6`, numeric len 3 | strip non-format chars → `386` |
 | `NIL` | Mastermind | **heartbleed** `data: yesn't,yesn't,…` (len == pw) | positional broadcast (stationary nodes; mobile ones mutate out mid-solve — see latency note) |
-| `PHP 5.4` | Anagram | hint "I accidentally **sorted** the password: 346" | try permutations of those digits (≤3!=6) |
+| `PHP 5.4` | Anagram | hint "**sorted** the password: 346" / "The PIN **uses** 035" · `data:"035"` | permutations of those digits (≤3!=6); triggers on sorted/anagram/rearranged/uses/made-up-of/consists-of |
 | `Laika4` | Trivia | hint "It's the dog's name" (alphabetic) | *unsolved — needs a knowledge/wordlist strategy* |
 | `Factori-Os` | Math property | hint "The password is divisible by K" | multiples of K (K=1 = troll, whole space → brute) |
 | `BellaCuore` | Roman numeral | hint "the value of the number 'XL'" | convert Roman → int (XL=40) |
