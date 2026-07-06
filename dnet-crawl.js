@@ -27,6 +27,7 @@ export async function main(ns) {
 	ns.disableLog("ALL");
 	const d = ns.dnet;
 	const here = ns.getHostname();
+	const crawlerRam = ns.getScriptRam(CRAWLER, here); // our own size — the real reason an exec won't fit
 	const from = ns.args[0] || ""; // parent — don't crawl back into it
 	const depth = Number(ns.args[1] ?? 0);
 	const maxDepth = Number(ns.args[2] ?? 4);
@@ -120,11 +121,12 @@ export async function main(ns) {
 		if (pid) spawned++;
 		else {
 			rep.spawnFails.push({ host, reason: "exec-failed", blockedRam: det.blockedRam });
-			ns.tprint(`[${here}] exec on ${host} failed (RAM? blockedRam=${det.blockedRam})`);
+			ns.tprint(`[${here}] exec on ${host} (${det.modelId}) failed — crawler needs ~${crawlerRam.toFixed(1)}GB, node blocked=${det.blockedRam}GB (won't fit)`);
 		}
 	}
 
 	db.report(ns, rep);
 	await db.flush(ns);
-	ns.tprint(`[${here}] d${depth}: cracked ${cracked}/${neighbors.length}, spawned ${spawned} deeper crawler(s)`);
+	const unhostable = rep.spawnFails.length; // cracked but couldn't host a child crawler (RAM)
+	ns.tprint(`[${here}] d${depth}: cracked ${cracked}/${neighbors.length}, spawned ${spawned} deeper crawler(s)${unhostable ? `, ${unhostable} unhostable` : ""}`);
 }
