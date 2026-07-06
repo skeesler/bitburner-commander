@@ -167,20 +167,35 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 		return pw;
 	};
 
-	// Static phase: everything the constraints can enumerate, cheapest/highest-confidence first.
-	// Skipped for known-Mastermind (NIL): defaults/pool won't hit a random broadcast password, and
-	// each ~10s guess is mutation exposure before we can freeze — go straight to the broadcast.
-	if (det.model !== "NIL") {
+	// Buffer-overflow model (Pr0verFl0): hint "password buffer is N bytes", no heartbleed feedback — the
+	// crack is to OVERFLOW (authenticate a string LONGER than the buffer), not to guess the password space.
+	const bufMatch = /buffer\D{0,12}(\d+)\s*byte/i.exec(det.hint || "");
+	const isOverflow = !!bufMatch;
+
+	// Static phase: everything the constraints can enumerate, cheapest/highest-confidence first. Skipped
+	// for NIL (broadcast) and overflow (over-length payload, not a candidate drawn from the password space).
+	if (det.model !== "NIL" && !isOverflow) {
 		for (const g of generate(c)) {
 			if (okr(await attempt(g))) return win(g);
 			if (stop) break;
 		}
 	}
 
+	// Overflow attempts: exact payload unknown, so try a small ordered spread of over-length strings —
+	// a length-only "0…" first, then growing nonzero "1…" smashes. Responses ride the FAILED trace, so
+	// even a miss teaches us how over-length input is handled (200 = win · 401 · or a new code = other bug).
+	if (!stop && isOverflow) {
+		const n = Number(bufMatch[1]) || det.length || 4;
+		for (const p of ["0".repeat(n + 1), "1".repeat(n + 1), "1".repeat(n + 2), "1".repeat(n + 4), "1".repeat(n + 8)]) {
+			if (stop) break;
+			if (okr(await attempt(p))) return win(p);
+		}
+	}
+
 	// Adaptive phase — per-guess feedback rides heartbleed(), not the auth reply. PIN mobile nodes
 	// first (freezeServer): a broadcast is ~alphabet guesses × ~10s ≈ 100s, but the net mutates every
 	// ~12s, so an unpinned node migrates out mid-solve. Freeze sacrifices the node's RAM/loot (accepted).
-	if (!stop && det.length > 0) {
+	if (!stop && !isOverflow && det.length > 0) {
 		// Pin mobile nodes so the slow broadcast can finish before the ~12s mutation. NOTE: freezeServer
 		// is NOT in the 3.0.1 API (it's in the dev-branch docs only) — guard it so its absence is a clean
 		// no-op, not a throw. If a real pin primitive exists under another name, wire it here.

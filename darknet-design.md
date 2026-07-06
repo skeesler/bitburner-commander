@@ -102,6 +102,7 @@ Archetypes seen (2026-07-04):
 | `BellaCuore` | Roman numeral | hint "the value of the number 'XL'" | convert Roman → int (XL=40) |
 | `OpenWebAccessPoint` | Fuzzy digit-leak | **heartbleed** `data`: "Did it have a 6 and a 5? Theres a 2, and maybe a 6…" | mine `\ba (\d)\b` from the hint clause → `mustContain` (drop "maybe" — soft); re-bleed to accumulate. len6/num, charisma 183 — *unsolved, framework only* |
 | `OctantVoxel` | Base conversion | hint "the base 9 number 548 in base 10" · `data: "9,548"` | `parseInt(number, base)` → 449 (guard: reject digit ≥ base). Static, cracks in 1 guess — solved |
+| `Pr0verFl0` | Buffer overflow | hint "password buffer is N bytes" (N == pw len) · heartbleed `null` | authenticate a string LONGER than N (over-length smash): try `0×(N+1)`, then `1×(N+1..N+8)`. **LIVE-UNVERIFIED** — payload spread is a guess; the trace shows how over-length input is handled |
 
 **Mastermind is positional + independent** (`yes` = right symbol/right place, `yesn't` =
 wrong). So don't brute the space — **broadcast** each symbol across all positions
