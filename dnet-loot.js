@@ -30,7 +30,7 @@ function payload(ns) {
  * memoryReallocation calls (that's what uncovers `.cache`). Then `.cache` → openCache
  * (money/programs), and `.data.txt`/`.lit` → ns.read (intel — RAM-free).
  */
-async function openAll(ns) {
+async function openAll(ns, info) {
 	const here = ns.getHostname();
 	const d = ns.dnet;
 	let blocked0 = 0;
@@ -51,7 +51,7 @@ async function openAll(ns) {
 		}
 	}
 	const caches = files.filter((f) => f.endsWith(".cache")).length;
-	ns.tprint(`[${here}] blocked=${blocked0}GB files=${files.length} caches=${caches}${loot.length ? " " + JSON.stringify(loot).slice(0, 700) : ""}`);
+	info(`[${here}] blocked=${blocked0}GB files=${files.length} caches=${caches}${loot.length ? " " + JSON.stringify(loot).slice(0, 700) : ""}`);
 	return loot;
 }
 
@@ -59,17 +59,20 @@ export async function main(ns) {
 	ns.disableLog("ALL");
 	const d = ns.dnet;
 	const here = ns.getHostname();
-	const from = ns.args[0] || "";
-	const depth = Number(ns.args[1] ?? 0);
-	const maxDepth = Number(ns.args[2] ?? 6);
-	const runId = ns.args[3] || String(Date.now());
+	const quiet = ns.args.includes("--suppress-info");
+	const info = quiet ? () => {} : (m) => ns.tprint(m);
+	const pos = ns.args.filter((a) => typeof a !== "string" || !a.startsWith("--")); // positional args, flags stripped
+	const from = pos[0] || "";
+	const depth = Number(pos[1] ?? 0);
+	const maxDepth = Number(pos[2] ?? 6);
+	const runId = pos[3] || String(Date.now());
 	const seen = `dnet-lseen-${runId}.txt`; // looter's own per-run marker
 	const passwords = db.loadDB(ns).passwords; // read the shipped password book
 
 	ns.write(seen, "1", "w");
 
 	// Harvest this node (openAll prints its own per-node summary).
-	const loot = await openAll(ns);
+	const loot = await openAll(ns, info);
 	const got = loot.filter((l) => !l.err).length;
 	db.report(ns, { from: here, loot });
 	await db.flush(ns);
@@ -93,7 +96,7 @@ export async function main(ns) {
 		try {
 			await d.connectToSession(host, String(passwords[host]));
 		} catch (e) {
-			ns.tprint(`[${here}] connectToSession ${host} err: ${e}`);
+			info(`[${here}] connectToSession ${host} err: ${e}`);
 			continue;
 		}
 		let ok = false;
@@ -108,10 +111,12 @@ export async function main(ns) {
 		} catch (e) {
 			/* ignore */
 		}
-		const pid = ns.exec(LOOT, host, 1, here, depth + 1, maxDepth, runId);
+		const childArgs = [here, depth + 1, maxDepth, runId];
+		if (quiet) childArgs.push("--suppress-info"); // propagate down the recursion
+		const pid = ns.exec(LOOT, host, 1, ...childArgs);
 		if (pid) spawned++;
 		else ns.tprint(`[${here}] exec loot on ${host} failed (RAM?)`);
 	}
 
-	ns.tprint(`[${here}] d${depth}: harvested ${got} file(s), spawned ${spawned} deeper looter(s)`);
+	info(`[${here}] d${depth}: harvested ${got} file(s), spawned ${spawned} deeper looter(s)`);
 }

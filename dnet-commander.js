@@ -22,6 +22,8 @@ export async function main(ns) {
 	ns.disableLog("ALL");
 	const auto = ns.args.includes("auto"); // self-drive the crawl → loot → scout pipeline
 	const loop = auto || ns.args.includes("loop");
+	const suppressInfo = ns.args.includes("--suppress-info"); // quiet the terminal + forward the flag to stages
+	const info = suppressInfo ? () => {} : (m) => ns.tprint(m); // (named suppressInfo — `quiet` is the idle counter below)
 	ns.ui.openTail();
 	if (auto) ns.print("Auto-pipeline ON: cycling crawl → loot → scout, re-launching each time the net goes quiet.");
 	const PIPELINE = ["dnet-crawl.js", "dnet-loot.js", "dnet-scout.js"]; // auto-pipeline stage order
@@ -113,7 +115,7 @@ export async function main(ns) {
 				/* darknet not reachable from home right now */
 			}
 
-			ns.tprint(db.summarize(d) + `  (+${merged} report${merged === 1 ? "" : "s"})`);
+			info(db.summarize(d) + `  (+${merged} report${merged === 1 ? "" : "s"})`);
 		}
 
 		// A pass is settled when reports have been quiet for IDLE_TICKS. In auto mode, launch the next
@@ -122,12 +124,13 @@ export async function main(ns) {
 			if (auto) {
 				const stage = PIPELINE[stageIdx];
 				stageIdx = (stageIdx + 1) % PIPELINE.length;
-				const pid = ns.exec("dnet-step.js", "home", 1, "darkweb", stage);
-				ns.tprint(pid ? `▶ auto-pipeline: launched ${stage} onto darkweb (epoch ${d.epoch})` : `auto-pipeline: exec dnet-step failed for ${stage} — RAM on home?`);
+				const pid = ns.exec("dnet-step.js", "home", 1, "darkweb", stage, ...(suppressInfo ? ["--suppress-info"] : []));
+				if (pid) info(`▶ auto-pipeline: launched ${stage} onto darkweb (epoch ${d.epoch})`);
+				else ns.tprint(`auto-pipeline: exec dnet-step failed for ${stage} — RAM on home?`);
 				quiet = 0; // fresh idle window for the stage we just launched
 			} else {
 				announcedIdle = true;
-				ns.tprint(`✔ quiet for ~${IDLE_TICKS * 4}s — pass finished.\n` + db.summarize(d));
+				info(`✔ quiet for ~${IDLE_TICKS * 4}s — pass finished.\n` + db.summarize(d));
 			}
 		}
 

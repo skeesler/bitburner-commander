@@ -30,10 +30,13 @@ export async function main(ns) {
 	ns.disableLog("ALL");
 	const d = ns.dnet;
 	const here = ns.getHostname();
-	const from = ns.args[0] || ""; // parent — don't relay back into it
-	const depth = Number(ns.args[1] ?? 0);
-	const maxDepth = Number(ns.args[2] ?? 8);
-	const runId = ns.args[3] || String(Date.now());
+	const quiet = ns.args.includes("--suppress-info");
+	const info = quiet ? () => {} : (m) => ns.tprint(m);
+	const pos = ns.args.filter((a) => typeof a !== "string" || !a.startsWith("--")); // positional args, flags stripped
+	const from = pos[0] || ""; // parent — don't relay back into it
+	const depth = Number(pos[1] ?? 0);
+	const maxDepth = Number(pos[2] ?? 8);
+	const runId = pos[3] || String(Date.now());
 	const seen = `dnet-sseen-${runId}.txt`; // scout's own per-run marker (distinct from crawl/loot)
 	const passwords = db.loadDB(ns).passwords; // the shipped book — what we can crack without solving
 
@@ -89,11 +92,13 @@ export async function main(ns) {
 			/* ignore */
 		}
 		if (!ok) continue;
-		const pid = ns.exec(SCOUT, host, 1, here, depth + 1, maxDepth, runId);
+		const childArgs = [here, depth + 1, maxDepth, runId];
+		if (quiet) childArgs.push("--suppress-info"); // propagate down the recursion
+		const pid = ns.exec(SCOUT, host, 1, ...childArgs);
 		if (pid) spawned++;
 	}
 
 	db.report(ns, { from: here, servers: cataloged }); // catalog the whole layer (incl. uncracked)
 	await db.flush(ns);
-	ns.tprint(`[${here}] d${depth}: mapped ${neighbors.length} neighbor(s), reached ${reached}, spawned ${spawned} scout(s)`);
+	info(`[${here}] d${depth}: mapped ${neighbors.length} neighbor(s), reached ${reached}, spawned ${spawned} scout(s)`);
 }

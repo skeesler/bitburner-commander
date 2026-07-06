@@ -49,12 +49,15 @@ run dnet-step.js darkweb dnet-crawl.js      # crawl again — cracks harder node
 
 Each crawl→loot turn cracks a bit deeper. Done for now: `kill dnet-commander.js`.
 
-**Quieter crawls (model hunting):** append `--suppress-info` to a crawl to show only `FAILED`/`failed`
-lines and genuine errors — hides the `CRACKED`/`SKIP`/`BACKOFF` spam, neighborhood summaries, and launch
-chatter. Propagates to child crawlers and into `solve()`.
+**Quieter runs (model hunting):** append `--suppress-info` to show only `FAILED`/`failed` lines and
+genuine errors — hides the `CRACKED`/`SKIP`/`BACKOFF` spam, neighborhood summaries, and launch chatter.
+Honored across the whole chain (`dnet-step` → crawl/loot/scout → their children → `solve()`), and by the
+commander, which also **forwards it to the stages it auto-launches**. The commander's floating tail window
+still shows the full map/intel; the flag only quiets the shared terminal.
 
 ```
-run dnet-step.js darkweb dnet-crawl.js --suppress-info
+run dnet-step.js darkweb dnet-crawl.js --suppress-info      # one quiet crawl
+run dnet-commander.js loop auto --suppress-info             # quiet self-driving pipeline
 ```
 
 ## Gotchas
