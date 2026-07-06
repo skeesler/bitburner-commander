@@ -64,6 +64,47 @@ const POS_TOKEN = /^(?:yes|yesn'?t|no)$/i;
 const isPositional = (fb, len) => Array.isArray(fb) && fb.length === len && fb.every((t) => POS_TOKEN.test(String(t).trim()));
 const BRUTE_CAP = 60; // only blind-brute a numeric node if constraints shrink it to <= this; else 503-bait
 
+/** Bulls & cows score for two equal-length strings: [exact-place, right-symbol-wrong-place]. */
+function bullsCows(g, c) {
+	let bulls = 0;
+	const gr = {}, cr = {};
+	for (let i = 0; i < g.length; i++) {
+		if (g[i] === c[i]) bulls++;
+		else {
+			gr[g[i]] = (gr[g[i]] || 0) + 1;
+			cr[c[i]] = (cr[c[i]] || 0) + 1;
+		}
+	}
+	let cows = 0;
+	for (const d in gr) cows += Math.min(gr[d], cr[d] || 0);
+	return [bulls, cows];
+}
+// DeepGreen feedback: exactly 2 NUMERIC tokens (fewer than pw length) — distinct from positional yes/no.
+const isBullsCows = (fb) => Array.isArray(fb) && fb.length === 2 && fb.every((t) => /^\d+$/.test(String(t).trim()));
+
+/** Minimax-lite guess pick for bulls & cows: the candidate whose largest feedback bucket is smallest
+ *  (fewest guesses to converge). Samples the pool when large so the compute stays trivial next to the
+ *  ~1s network round-trip. Cuts avg guesses ~8 → ~6 for len3 — more solves land inside the reroll window. */
+function pickBullsGuess(cands) {
+	if (cands.length <= 2) return cands[0];
+	const step = cands.length > 240 ? Math.ceil(cands.length / 240) : 1;
+	let best = cands[0], bestWorst = Infinity;
+	for (let i = 0; i < cands.length; i += step) {
+		const buckets = {};
+		let worst = 0;
+		for (const c of cands) {
+			const k = bullsCows(cands[i], c).join(",");
+			const v = (buckets[k] = (buckets[k] || 0) + 1);
+			if (v > worst) worst = v;
+		}
+		if (worst < bestWorst) {
+			bestWorst = worst;
+			best = cands[i];
+		}
+	}
+	return best;
+}
+
 /**
  * Per-guess feedback rides heartbleed(), not the authenticate reply (confirmed 2026-07-05).
  * Bleed the node, find the recent-log entry for THIS guess, and return its decoded `data` string
@@ -254,6 +295,26 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 				const answer = solved.join("");
 				if (okr(await attempt(answer))) return win(answer);
 			}
+		} else if (isBullsCows(fb0) && det.format.includes("numeric") && det.length >= 1 && det.length <= 4) {
+			// DeepGreen / bulls & cows: feedback is [exact-place, right-digit-wrong-place] — 2 numeric
+			// tokens, fewer than the password length. Keep the candidate set consistent with every
+			// (guess, feedback), guess the first survivor, bleed, filter. ~5–7 guesses for len3, short
+			// enough to fit inside the ~12s reroll window (unlike the ~10-guess broadcast). Cap length so
+			// the space stays enumerable (10^4). Empty set ⇒ password rerolled under us → abort.
+			let cands = [];
+			for (let i = 0; i < 10 ** det.length; i++) cands.push(String(i).padStart(det.length, "0"));
+			const bcEq = (a, b) => a[0] === b[0] && a[1] === b[1];
+			const filterBy = (guess, bc) => (cands = cands.filter((cd) => cd !== guess && bcEq(bullsCows(guess, cd), bc)));
+			filterBy(first, fb0.map(Number)); // seed with the probe (e.g. "000" → [0,0])
+			while (cands.length && !stop && tries < max) {
+				const g = pickBullsGuess(cands);
+				if (okr(await attempt(g))) return win(g);
+				const fb = feedback({ data: await bleedData(ns, host, g) });
+				trace.push({ bleedAfter: g, data: fb });
+				if (!isBullsCows(fb)) break; // grammar changed / no feedback
+				filterBy(g, fb.map(Number));
+			}
+			if (!stop && !cands.length) stop = "rerolled"; // no candidate fits → password changed under us
 		} else if (!stop) {
 			// Fuzzy-leak model (e.g. OpenWebAccessPoint): the bled `data` is noisy prose carrying a
 			// "contains these digits" hint. Fold it into the constraint set and re-generate a narrowed

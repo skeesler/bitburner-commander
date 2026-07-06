@@ -103,6 +103,7 @@ Archetypes seen (2026-07-04):
 | `OpenWebAccessPoint` | Fuzzy digit-leak | **heartbleed** `data`: "Did it have a 6 and a 5? Theres a 2, and maybe a 6…" | mine `\ba (\d)\b` from the hint clause → `mustContain` (drop "maybe" — soft); re-bleed to accumulate. len6/num, charisma 183 — *unsolved, framework only* |
 | `OctantVoxel` | Base conversion | hint "the base 9 number 548 in base 10" · `data: "9,548"` | `parseInt(number, base)` → 449 (guard: reject digit ≥ base). Static, cracks in 1 guess — solved |
 | `Pr0verFl0` | Buffer overflow | hint "password buffer is N bytes" (N == pw len) · heartbleed `null` | authenticate a NONZERO string of length **~2N** — solved: `"1"×8` cracked an N=4 node (N+1/N+2 and all-"0" failed → content + ~double-length matter). Spread tries N+1→4N |
+| `DeepGreen` | Bulls & cows (Mastermind) | **heartbleed** `data: "b,c"` = [exact-place, right-digit-wrong-place] — **2** numeric tokens (fewer than pw len; that's the tell vs NIL's per-position) | candidate-elimination + minimax pick; ~6 guesses for len3. FAST (~1.3s/guess) so it fits the ~12s reroll window; empty candidate set ⇒ reroll → abort. Numeric, len ≤ 4 |
 
 **Mastermind is positional + independent** (`yes` = right symbol/right place, `yesn't` =
 wrong). So don't brute the space — **broadcast** each symbol across all positions
