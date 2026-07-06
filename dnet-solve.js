@@ -62,6 +62,7 @@ const isYes = (t) => /^yes$/i.test(String(t).trim());
 // Does this feedback look like Mastermind positional tokens (one yes/yesn't per position)?
 const POS_TOKEN = /^(?:yes|yesn'?t|no)$/i;
 const isPositional = (fb, len) => Array.isArray(fb) && fb.length === len && fb.every((t) => POS_TOKEN.test(String(t).trim()));
+const BRUTE_CAP = 60; // only blind-brute a numeric node if constraints shrink it to <= this; else 503-bait
 
 /**
  * Per-guess feedback rides heartbleed(), not the authenticate reply (confirmed 2026-07-05).
@@ -179,14 +180,21 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 	// first (freezeServer): a broadcast is ~alphabet guesses × ~10s ≈ 100s, but the net mutates every
 	// ~12s, so an unpinned node migrates out mid-solve. Freeze sacrifices the node's RAM/loot (accepted).
 	if (!stop && det.length > 0) {
+		// Pin mobile nodes so the slow broadcast can finish before the ~12s mutation. NOTE: freezeServer
+		// is NOT in the 3.0.1 API (it's in the dev-branch docs only) — guard it so its absence is a clean
+		// no-op, not a throw. If a real pin primitive exists under another name, wire it here.
 		if (det.raw.isStationary === false) {
-			try {
-				const fr = await d.freezeServer(host);
-				froze = fr ? `code ${fr.code ?? "?"} ${fr.message ?? ""}`.trim() : "no-result";
-				ns.print(`  ❄ froze ${host} → ${froze}`);
-			} catch (e) {
-				froze = `ERR ${e}`;
-				ns.print(`  freezeServer(${host}) failed: ${e} — solving unpinned, may lose it to mutation`);
+			if (typeof d.freezeServer === "function") {
+				try {
+					const fr = await d.freezeServer(host);
+					froze = fr ? `code ${fr.code ?? "?"} ${fr.message ?? ""}`.trim() : "no-result";
+					ns.print(`  ❄ froze ${host} → ${froze}`);
+				} catch (e) {
+					froze = `ERR ${e}`;
+					ns.print(`  freezeServer(${host}) failed: ${e}`);
+				}
+			} else {
+				froze = "unavailable (no freezeServer in 3.0.1)";
 			}
 		}
 
@@ -230,12 +238,22 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 				if (okr(await attempt(g))) return win(g);
 				if (stop) break;
 			}
-			// Last resort: small constrained numeric brute (short passwords only).
-			if (!stop && det.format.includes("numeric") && det.length <= 4) {
-				for (let i = 0; i < 10 ** det.length && tries < max && !stop; i++) {
+			// Last resort: constrained numeric brute — but ONLY if constraints have shrunk the space to a
+			// handful. Blind-bruting 1000+ combos just burns ~1s/guess and trips the 503 rate limit; an
+			// unconstrained node is better left for a looted hint than hammered.
+			if (!stop && det.format.includes("numeric") && det.length > 0 && det.length <= 4) {
+				const cands = [];
+				for (let i = 0; i < 10 ** det.length && cands.length <= BRUTE_CAP; i++) {
 					const g = String(i).padStart(det.length, "0");
-					if (!satisfies(cc, g)) continue; // looted constraints prune the brute space too
-					if (okr(await attempt(g))) return win(g);
+					if (satisfies(cc, g)) cands.push(g); // looted constraints prune the brute space too
+				}
+				if (cands.length && cands.length <= BRUTE_CAP) {
+					for (const g of cands) {
+						if (okr(await attempt(g))) return win(g);
+						if (stop) break;
+					}
+				} else {
+					ns.print(`  brute space >${BRUTE_CAP} for ${host} — skipping (would 503); needs a hint/looted cred`);
 				}
 			}
 		}
