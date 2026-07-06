@@ -181,12 +181,14 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 		}
 	}
 
-	// Overflow attempts: exact payload unknown, so try a small ordered spread of over-length strings —
-	// a length-only "0…" first, then growing nonzero "1…" smashes. Responses ride the FAILED trace, so
-	// even a miss teaches us how over-length input is handled (200 = win · 401 · or a new code = other bug).
+	// Overflow attempts. CONFIRMED (2026-07-06, cell^citadel, N=4): the crack is a NONZERO string of
+	// length ~2N — "1"×8 won, while N+1/N+2 and the all-"0" length-only probe did NOT. So content matters
+	// (a zero smash doesn't flip the flag) and the threshold is ~double the buffer. The spread keeps the
+	// cheap length-only + minimal probes (a different node might differ), then targets 2N and 4N to stay
+	// robust across buffer sizes; every attempt rides the FAILED trace if a size is ever missed.
 	if (!stop && isOverflow) {
 		const n = Number(bufMatch[1]) || det.length || 4;
-		for (const p of ["0".repeat(n + 1), "1".repeat(n + 1), "1".repeat(n + 2), "1".repeat(n + 4), "1".repeat(n + 8)]) {
+		for (const p of ["0".repeat(n + 1), "1".repeat(n + 1), "1".repeat(n + 2), "1".repeat(2 * n), "1".repeat(4 * n)]) {
 			if (stop) break;
 			if (okr(await attempt(p))) return win(p);
 		}
