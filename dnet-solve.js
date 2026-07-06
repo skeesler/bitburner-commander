@@ -203,6 +203,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 		const probe = await attempt(first);
 		if (okr(probe)) return win(first);
 		const data0 = !stop ? await bleedData(ns, host, first) : null;
+		trace.push({ bleedAfter: first, data: data0 }); // surface the channel on FAILED dumps (new models)
 		const fb0 = feedback({ data: data0 });
 
 		if (isPositional(fb0, det.length)) {
@@ -218,7 +219,9 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 				const g = alpha[s].repeat(det.length);
 				const r = await attempt(g);
 				if (okr(r)) return win(g);
-				const fb = feedback({ data: await bleedData(ns, host, g) });
+				const gdata = await bleedData(ns, host, g);
+				trace.push({ bleedAfter: g, data: gdata });
+				const fb = feedback({ data: gdata });
 				if (isPositional(fb, det.length)) apply(g, fb);
 			}
 			if (!stop && !solved.includes(null)) {
