@@ -175,12 +175,30 @@ export function edgeAge(db, host) {
 	return e ? db.epoch - e.epoch : Infinity;
 }
 
+// A server seen within this many epochs of "now" counts as LIVE. The commander bumps epoch every
+// mutation (~12s), so ~20 epochs ≈ the last ~4 min — wide enough to cover a single slow crawl's span
+// (so its own early nodes aren't mislabelled ghosts). The DB never evicts, so `servers cataloged` is the
+// cumulative union of every hostname ever seen (the name generator mints theme-variants — neo%grid,
+// neo^hub, neo^hu…), which is why it dwarfs the live count. NOTE: "live" only means "confirmed within
+// the window", so it reads ~0 when no crawl has run recently — it's a during/just-after-a-crawl gauge.
+export const FRESH_EPOCHS = 20;
+
+/** How many catalogued servers were seen within `within` epochs of the current epoch (live vs. ghosts). */
+export function liveServers(db, within = FRESH_EPOCHS) {
+	const now = db.epoch ?? 0;
+	let live = 0;
+	for (const s of Object.values(db.servers)) if (now - (s.lastSeenEpoch ?? -Infinity) <= within) live++;
+	return live;
+}
+
 /** One-line-per-section summary, for `run dnet-db.js`. */
 export function summarize(db) {
 	const n = (o) => Object.keys(o).length;
+	const cataloged = n(db.servers);
+	const live = liveServers(db);
 	return [
 		`DarkNet DB  (epoch ${db.epoch}, saved ${db.updated ? new Date(db.updated).toLocaleString() : "never"})`,
-		`  servers cataloged : ${n(db.servers)}`,
+		`  servers cataloged : ${cataloged}  (${live} live ≤${FRESH_EPOCHS}ep, ${cataloged - live} stale ghosts)`,
 		`  passwords held    : ${n(db.passwords)}`,
 		`  edges mapped      : ${n(db.edges)}`,
 		`  frontier (open)   : ${n(db.frontier)}`,
