@@ -28,10 +28,13 @@ export async function main(ns) {
 	const d = ns.dnet;
 	const here = ns.getHostname();
 	const crawlerRam = ns.getScriptRam(CRAWLER, here); // our own size — the real reason an exec won't fit
-	const from = ns.args[0] || ""; // parent — don't crawl back into it
-	const depth = Number(ns.args[1] ?? 0);
-	const maxDepth = Number(ns.args[2] ?? 4);
-	const runId = ns.args[3] || String(Date.now()); // root mints it; children inherit it
+	const quiet = ns.args.includes("--suppress-info"); // only surface failed/FAILED (and errors)
+	const info = quiet ? () => {} : (m) => ns.tprint(m);
+	const pos = ns.args.filter((a) => typeof a !== "string" || !a.startsWith("--")); // positional args, flags stripped
+	const from = pos[0] || ""; // parent — don't crawl back into it
+	const depth = Number(pos[1] ?? 0);
+	const maxDepth = Number(pos[2] ?? 4);
+	const runId = pos[3] || String(Date.now()); // root mints it; children inherit it
 	const seen = `dnet-seen-${runId}.txt`; // per-run marker → fresh runs re-crawl
 	const store = db.loadDB(ns); // shipped book: passwords already held + looted frontier hints
 
@@ -87,7 +90,7 @@ export async function main(ns) {
 			const hints = store.frontier?.[host]?.hints || [];
 			let pw = null;
 			if (known && (await d.authenticate(host, String(known)))?.code === 200) pw = known;
-			else pw = await solve(ns, host, { hints, pool: store.wordlist || [] });
+			else pw = await solve(ns, host, { hints, pool: store.wordlist || [], quiet });
 			if (pw == null) continue; // solve() already logged why
 			rep.passwords[host] = pw;
 			await trickle({ passwords: { [host]: pw }, servers: [srv], hints: det.passwordHint ? [{ host, hint: det.passwordHint }] : [] });
@@ -117,7 +120,9 @@ export async function main(ns) {
 			rep.spawnFails.push({ host, reason: "scp-failed", blockedRam: det.blockedRam });
 			continue;
 		}
-		const pid = ns.exec(CRAWLER, host, 1, here, depth + 1, maxDepth, runId);
+		const childArgs = [here, depth + 1, maxDepth, runId];
+		if (quiet) childArgs.push("--suppress-info"); // propagate the flag down the recursion
+		const pid = ns.exec(CRAWLER, host, 1, ...childArgs);
 		if (pid) spawned++;
 		else {
 			rep.spawnFails.push({ host, reason: "exec-failed", blockedRam: det.blockedRam });
@@ -128,5 +133,5 @@ export async function main(ns) {
 	db.report(ns, rep);
 	await db.flush(ns);
 	const unhostable = rep.spawnFails.length; // cracked but couldn't host a child crawler (RAM)
-	ns.tprint(`[${here}] d${depth}: cracked ${cracked}/${neighbors.length}, spawned ${spawned} deeper crawler(s)${unhostable ? `, ${unhostable} unhostable` : ""}`);
+	info(`[${here}] d${depth}: cracked ${cracked}/${neighbors.length}, spawned ${spawned} deeper crawler(s)${unhostable ? `, ${unhostable} unhostable` : ""}`);
 }

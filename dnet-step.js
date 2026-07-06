@@ -26,6 +26,8 @@ export async function main(ns) {
 	const script = ns.args[1] || "dnet-recon.js";
 	const rest = ns.args.slice(2);
 	const d = ns.dnet;
+	const quiet = rest.includes("--suppress-info"); // also forwarded to the launched script (it's in rest)
+	const info = quiet ? () => {} : (m) => ns.tprint(m);
 
 	let det = null;
 	try {
@@ -34,7 +36,7 @@ export async function main(ns) {
 		ns.tprint(`getServerDetails(${target}) err: ${e}`);
 	}
 	if (det) {
-		ns.tprint(
+		info(
 			`target ${target}: model=${det.modelId} online=${det.isOnline} ` +
 				`connected=${det.isConnectedToCurrentServer} session=${det.hasSession}`,
 		);
@@ -44,7 +46,7 @@ export async function main(ns) {
 	if (det && det.hasSession === false) {
 		try {
 			const r = await d.authenticate(target, "");
-			ns.tprint(`authenticate(${target}, "") -> ${r && r.code} ${r && r.message}`);
+			info(`authenticate(${target}, "") -> ${r && r.code} ${r && r.message}`);
 		} catch (e) {
 			ns.tprint(`authenticate err: ${e}`);
 		}
@@ -57,7 +59,7 @@ export async function main(ns) {
 	} catch (e) {
 		ns.tprint(`scp err: ${e}`);
 	}
-	ns.tprint(`scp ${files.length} files -> ${target} (${files.join(", ")}): ${scpOk}`);
+	info(`scp ${files.length} files -> ${target} (${files.join(", ")}): ${scpOk}`);
 
 	let pid = 0;
 	try {
@@ -65,9 +67,6 @@ export async function main(ns) {
 	} catch (e) {
 		ns.tprint(`exec err: ${e}`);
 	}
-	ns.tprint(
-		pid
-			? `exec ${script} on ${target} (pid ${pid}) — its output prints to your terminal`
-			: `exec FAILED — check: files scp'd? RAM on ${target}? session? directly connected?`,
-	);
+	if (pid) info(`exec ${script} on ${target} (pid ${pid}) — its output prints to your terminal`);
+	else ns.tprint(`exec FAILED — check: files scp'd? RAM on ${target}? session? directly connected?`);
 }
