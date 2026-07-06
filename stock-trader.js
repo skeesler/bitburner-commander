@@ -34,6 +34,23 @@ export async function main(ns) {
   let startWorth = null, startT = 0, tick = 0;
 
   while (true) {
+    // 0) Honor the keepLiquid reserve. If liquid cash has fallen below it — because
+    //    you RAISED keepLiquid, or spent cash elsewhere — sell the weakest-forecast
+    //    positions (keeping the strong ones) until it's topped back up. This makes
+    //    keepLiquid a real guarantee, not just a "don't invest below this" cap.
+    let deficit = keepLiquid - ns.getServerMoneyAvailable("home");
+    if (deficit > 0) {
+      const held = symbols
+        .map(sym => ({ sym, shares: ns.stock.getPosition(sym)[0], fc: ns.stock.getForecast(sym) }))
+        .filter(x => x.shares > 0)
+        .sort((a, b) => a.fc - b.fc);   // weakest forecast first
+      for (const h of held) {
+        if (deficit <= 0) break;
+        deficit -= ns.stock.getSaleGain(h.sym, h.shares, "Long");
+        ns.stock.sellStock(h.sym, h.shares);
+      }
+    }
+
     // 1) SELL any long whose forecast has flipped below SELL_THRESH.
     for (const sym of symbols) {
       const [shares] = ns.stock.getPosition(sym);
