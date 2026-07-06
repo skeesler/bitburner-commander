@@ -73,6 +73,17 @@ console.log("\nArchetypes (design-doc table) — answer must appear as a candida
 	ok("BellaCuore → 40 in", has(c, "40"), JSON.stringify(c.slice(0, 4)));
 }
 
+// OctantVoxel — base conversion: "the base 9 number 548 in base 10" → 449 (5·81 + 4·9 + 8).
+{
+	const c = cands({ hint: "the password is the base 9 number 548 in base 10", length: 3, format: "numeric" });
+	ok("OctantVoxel base9→10 → 449 in", has(c, "449"), JSON.stringify(c.slice(0, 4)));
+	const d = cands({ data: "9,548", length: 3, format: "numeric" });
+	ok("OctantVoxel structured data '9,548' → 449 in", has(d, "449"), JSON.stringify(d.slice(0, 4)));
+	// A digit >= base is invalid → the guard must reject it, not push parseInt's partial parse.
+	// "base 8 number 519": '9' is invalid in base 8; unguarded parseInt("519",8) would stop at 9 → 41.
+	ok("invalid base digit → no partial base-conversion literal (not 41)", !parseText("base 8 number 519").literals.includes("41"));
+}
+
 // Range hint — "between 10 and 20" enumerates just that band.
 {
 	const c = cands({ hint: "a number between 10 and 20", length: 2, format: "numeric" });

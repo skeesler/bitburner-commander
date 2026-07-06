@@ -103,6 +103,19 @@ export function parseText(text, ctx = {}) {
 			if (len) c.literals.push(String(v).padStart(len, "0"));
 		}
 	}
+	// "the base 9 number 548 in base 10" → convert 548 FROM base 9 → 449 (OctantVoxel). Base varies per
+	// node; read it from the hint, or from the `data` field's structured "base,number" form (e.g. "9,548").
+	if ((m = /base\s+(\d{1,2})\s+number\s+([0-9a-z]+)/i.exec(s)) || (m = /^\s*(\d{1,2})\s*,\s*([0-9a-z]+)\s*$/i.exec(s))) {
+		const base = Number(m[1]);
+		const digits = m[2].toLowerCase();
+		if (base >= 2 && base <= 36 && [...digits].every((ch) => parseInt(ch, 36) < base)) {
+			const v = parseInt(digits, base);
+			if (Number.isFinite(v)) {
+				c.literals.push(String(v));
+				if (len) c.literals.push(String(v).padStart(len, "0"));
+			}
+		}
+	}
 	// Explicit leak: "The PIN is 77", "Remember this password: 428", "the code = 1234".
 	if ((m = /(?:password|pin|code|answer|secret)\b\D*?(\d{1,8})/i.exec(s)) && numeric) c.literals.push(m[1]);
 	if (!numeric && (m = /(?:password|pin|code|answer|name|secret)\b(?:\s+is|\s*[:=])\s*"?([a-z0-9]{2,})"?/i.exec(s))) c.literals.push(m[1]);
