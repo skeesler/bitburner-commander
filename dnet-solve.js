@@ -118,11 +118,11 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 
 	// Bail on nodes we structurally can't crack from here.
 	if (det.raw.isOnline === false || det.length < 0) {
-		ns.tprint(`SKIP ${host}: offline/invalid`);
+		ns.tprint(`SKIP ${host} (${det.model}): offline/invalid`);
 		return null;
 	}
 	if (det.raw.isConnectedToCurrentServer === false) {
-		ns.tprint(`SKIP ${host}: not directly connected (would 351)`);
+		ns.tprint(`SKIP ${host} (${det.model}): not directly connected (would 351)`);
 		return null;
 	}
 
@@ -160,7 +160,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 	};
 	const okr = (resp) => classify(resp) === "ok";
 	const win = (pw) => {
-		ns.tprint(`CRACKED ${host} in ${tries} tries — password = "${pw}"`);
+		ns.tprint(`CRACKED ${host} (${det.model}) in ${tries} tries — password = "${pw}"`);
 		return pw;
 	};
 
@@ -238,9 +238,9 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 		}
 	}
 
-	if (stop === "unreachable") ns.tprint(`SKIP ${host}: direct connection required (351)`);
-	else if (stop === "ratelimited") ns.tprint(`BACKOFF ${host}: rate-limited (503) — stopped after ${tries}`);
-	else if (stop === "error") ns.tprint(`SKIP ${host}: authenticate error (offline/migrated?)`);
+	if (stop === "unreachable") ns.tprint(`SKIP ${host} (${det.model}): direct connection required (351)`);
+	else if (stop === "ratelimited") ns.tprint(`BACKOFF ${host} (${det.model}): rate-limited (503) — stopped after ${tries}`);
+	else if (stop === "error") ns.tprint(`SKIP ${host} (${det.model}): authenticate error (offline/migrated?)`);
 	else ns.tprint(`FAILED ${host} (${det.model}) in ${tries} tries — possible NEW model:\n${JSON.stringify(det.raw, null, 2)}\nattempts (watch data + ms):\n${JSON.stringify(trace.slice(-8), null, 2)}`);
 	return null;
 }
