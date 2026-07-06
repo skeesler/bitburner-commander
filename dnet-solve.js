@@ -6,9 +6,14 @@
  *     AND any looted intel passed in via opts.hints, then generated cheapest-first. This is where
  *     literal leaks, captchas, anagrams, divisibility, Roman numerals, ranges, wordlists, defaults,
  *     and looted "contains X and Y" narrowing all live — one predicate set, one candidate list.
- *   ADAPTIVE strategies — need per-guess feedback, so they can't be pre-generated:
- *     · positional "broadcast" solve (NIL / Mastermind)
- *     · small numeric brute-force fallback (now filtered through the constraints too)
+ *   ADAPTIVE strategies — need PER-GUESS feedback, which rides heartbleed() NOT the authenticate
+ *     reply (confirmed 2026-07-05): guess -> heartbleed(host) -> parse the log entry for that guess
+ *     -> its `data` string carries the hint. Two grammars seen through that one channel:
+ *       · positional "yes/yesn't" (NIL / Mastermind) -> broadcast each symbol across all positions
+ *       · fuzzy digit-leak prose (OpenWebAccessPoint) -> fold into `mustContain`, re-generate
+ *     Mobile nodes are freezeServer()'d first: a broadcast is ~alphabet guesses at ~10s each, but the
+ *     net mutates every ~12s, so an unpinned node migrates out mid-solve. Freeze sacrifices the node's
+ *     RAM/loot — accepted for these crack-for-the-flywheel nodes.
  *
  * We make as FEW authenticate calls as possible — nodes 503-rate-limit you if you hammer them,
  * so brute-force is actively harmful. Stops immediately on non-password responses:
@@ -18,7 +23,7 @@
  * Usage:  run dnet-solve.js <host>   |   import { solve } from "dnet-solve.js"
  *         solve(ns, host, { hints: ["contains 3 and 1", ...], pool: [...wordlist] })
  */
-import { constraintsFor, generate, satisfies, describe } from "dnet-constraints.js";
+import { constraintsFor, generate, satisfies, describe, decodeEntities, harvestCandidates } from "dnet-constraints.js";
 
 /** Bucket an authenticate response: ok | wrong | unreachable | ratelimited. */
 function classify(resp) {
@@ -49,11 +54,51 @@ function readDetails(raw) {
 /** Split per-position feedback ("yes,yesn't,..." or array) into tokens. */
 function feedback(resp) {
 	let d = resp && resp.data;
-	if (d == null) return null;
+	if (d == null || d === "") return null;
 	if (typeof d === "string") d = d.split(",").map((s) => s.trim());
 	return Array.isArray(d) ? d : null;
 }
 const isYes = (t) => /^yes$/i.test(String(t).trim());
+// Does this feedback look like Mastermind positional tokens (one yes/yesn't per position)?
+const POS_TOKEN = /^(?:yes|yesn'?t|no)$/i;
+const isPositional = (fb, len) => Array.isArray(fb) && fb.length === len && fb.every((t) => POS_TOKEN.test(String(t).trim()));
+
+/**
+ * Per-guess feedback rides heartbleed(), not the authenticate reply (confirmed 2026-07-05).
+ * Bleed the node, find the recent-log entry for THIS guess, and return its decoded `data` string
+ * (positional tokens for Mastermind, or noisy fuzzy-leak prose for others), else null. Each log
+ * entry is a JSON string: {code, message, data, passwordAttempted}.
+ */
+async function bleedData(ns, host, guess) {
+	let res;
+	try {
+		res = await ns.dnet.heartbleed(host);
+	} catch (e) {
+		ns.print(`  heartbleed(${host}) err: ${e}`);
+		return null;
+	}
+	const logs = res && Array.isArray(res.logs) ? res.logs : [];
+	let match = null;
+	for (const line of logs) {
+		let entry;
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			continue; // not our JSON — heartbeat/flavor noise
+		}
+		if (entry && String(entry.passwordAttempted) === String(guess)) match = entry; // newest match wins
+	}
+	if (!match && logs.length) {
+		try {
+			match = JSON.parse(logs[logs.length - 1]);
+		} catch {
+			/* noise-only bleed */
+		}
+	}
+	const data = match && typeof match.data === "string" ? decodeEntities(match.data) : null;
+	if (data) ns.print(`  ↩ heartbleed[${guess}]: ${data.slice(0, 120)}`);
+	return data || null;
+}
 
 function alphabet(format) {
 	if (format.includes("numeric")) return "0123456789".split("");
@@ -87,10 +132,14 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 
 	let tries = 0;
 	let stop = null; // "unreachable" | "ratelimited" | "error"
+	const tried = new Set(); // never spend a rate-limited guess on a duplicate (static + adaptive overlap)
 	const trace = []; // per-attempt {guess, code, message, data, ms} — dumped on FAILED so a new/odd
 	                  // model is self-diagnosing (esp. TIMING models: watch `ms` track correctness).
 	const attempt = async (guess) => {
 		if (guess == null || tries >= max || stop) return null;
+		guess = String(guess);
+		if (tried.has(guess)) return null;
+		tried.add(guess);
 		tries++;
 		let resp;
 		const t0 = Date.now();
@@ -116,62 +165,75 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [] } = {}
 	};
 
 	// Static phase: everything the constraints can enumerate, cheapest/highest-confidence first.
-	for (const g of generate(c)) {
-		if (okr(await attempt(g))) return win(g);
-		if (stop) break;
+	// Skipped for known-Mastermind (NIL): defaults/pool won't hit a random broadcast password, and
+	// each ~10s guess is mutation exposure before we can freeze — go straight to the broadcast.
+	if (det.model !== "NIL") {
+		for (const g of generate(c)) {
+			if (okr(await attempt(g))) return win(g);
+			if (stop) break;
+		}
 	}
 
-	// Adaptive phase: positional broadcast (Mastermind), else small numeric brute — both
-	// constrained by what we know (alphabet from format, and satisfies() prunes the brute).
+	// Adaptive phase — per-guess feedback rides heartbleed(), not the auth reply. PIN mobile nodes
+	// first (freezeServer): a broadcast is ~alphabet guesses × ~10s ≈ 100s, but the net mutates every
+	// ~12s, so an unpinned node migrates out mid-solve. Freeze sacrifices the node's RAM/loot (accepted).
 	if (!stop && det.length > 0) {
+		if (det.raw.isStationary === false) {
+			try {
+				const fr = await d.freezeServer(host);
+				ns.print(`  ❄ froze ${host} to hold it for the solve (${(fr && fr.message) || "ok"})`);
+			} catch (e) {
+				ns.print(`  freezeServer(${host}) failed: ${e} — solving unpinned, may lose it to mutation`);
+			}
+		}
+
 		const alpha = alphabet(det.format);
 		const first = alpha[0].repeat(det.length);
 		const probe = await attempt(first);
 		if (okr(probe)) return win(first);
-		let fb0 = !stop ? feedback(probe) : null;
+		const data0 = !stop ? await bleedData(ns, host, first) : null;
+		const fb0 = feedback({ data: data0 });
 
-		// DIAGNOSTIC (temporary): NIL gave NO positional feedback on the auth return live (data absent),
-		// so the broadcast never engaged. Suspicion: the yes/yesn't grammar rides heartbleed (the log
-		// bleed), not the authenticate() reply. When the probe yields no usable feedback, bleed the node
-		// right after our guess and dump it — heartbleed reads recent logs, where feedback for THIS guess
-		// (`first`) should sit. Rides home via the FAILED trace. Revert once we've seen the grammar.
-		if (!stop && (!fb0 || fb0.length !== det.length)) {
-			try {
-				const bled = await d.heartbleed(host);
-				trace.push({ after: first, heartbleed: bled });
-				ns.print(`  heartbleed(${host}) after "${first}": ${JSON.stringify(bled).slice(0, 400)}`);
-				// If the bled log parses as per-position feedback of the right length, adopt it so the
-				// broadcast can actually proceed (and we confirm the channel in one shot).
-				const hb = feedback({ data: bled });
-				if (hb && hb.length === det.length) fb0 = hb;
-			} catch (e) {
-				trace.push({ heartbleedErr: String(e) });
-				ns.print(`  heartbleed(${host}) err: ${e}`);
-			}
-		}
-
-		if (fb0 && fb0.length === det.length) {
+		if (isPositional(fb0, det.length)) {
+			// NIL / Mastermind: broadcast each symbol across all positions, reading the positional
+			// yes/yesn't from heartbleed after each guess. Resolves every position whose symbol matches,
+			// so ≤ (alphabet size) guesses cracks any length — no brute of the space.
 			const solved = new Array(det.length).fill(null);
 			const apply = (g, fb) => {
-				for (let i = 0; i < det.length; i++) if (solved[i] == null && fb[i] != null && isYes(fb[i])) solved[i] = g[i];
+				for (let i = 0; i < det.length; i++) if (solved[i] == null && isYes(fb[i])) solved[i] = g[i];
 			};
 			apply(first, fb0);
 			for (let s = 1; s < alpha.length && solved.includes(null) && !stop; s++) {
 				const g = alpha[s].repeat(det.length);
 				const r = await attempt(g);
 				if (okr(r)) return win(g);
-				const fb = feedback(r);
-				if (fb) apply(g, fb);
+				const fb = feedback({ data: await bleedData(ns, host, g) });
+				if (isPositional(fb, det.length)) apply(g, fb);
 			}
 			if (!stop && !solved.includes(null)) {
 				const answer = solved.join("");
 				if (okr(await attempt(answer))) return win(answer);
 			}
-		} else if (!stop && det.format.includes("numeric") && det.length <= 4) {
-			for (let i = 0; i < 10 ** det.length && tries < max && !stop; i++) {
-				const g = String(i).padStart(det.length, "0");
-				if (!satisfies(c, g)) continue; // looted constraints prune the brute space too
+		} else if (!stop) {
+			// Fuzzy-leak model (e.g. OpenWebAccessPoint): the bled `data` is noisy prose carrying a
+			// "contains these digits" hint. Fold it into the constraint set and re-generate a narrowed
+			// list; also mine the noise for cross-node candidates (leaked creds/wordlists) into the pool.
+			let cc = c;
+			if (data0) {
+				cc = constraintsFor({ details: det, texts: [...hints, data0], pool: [...pool, ...harvestCandidates(data0)] });
+				ns.print(`  heartbleed hint → ${describe(cc)}`);
+			}
+			for (const g of generate(cc)) {
 				if (okr(await attempt(g))) return win(g);
+				if (stop) break;
+			}
+			// Last resort: small constrained numeric brute (short passwords only).
+			if (!stop && det.format.includes("numeric") && det.length <= 4) {
+				for (let i = 0; i < 10 ** det.length && tries < max && !stop; i++) {
+					const g = String(i).padStart(det.length, "0");
+					if (!satisfies(cc, g)) continue; // looted constraints prune the brute space too
+					if (okr(await attempt(g))) return win(g);
+				}
 			}
 		}
 	}

@@ -95,7 +95,7 @@ Archetypes seen (2026-07-04):
 | `FreshInstall_1.0` | Default password | hint "I never changed the password" | try defaults → `admin` |
 | `DeskMemo_3.1` | Literal leak | hint "The PIN is 77" | parse answer from hint text → `77` |
 | `CloudBlare(tm)` | Captcha | `data: 3(8~6`, numeric len 3 | strip non-format chars → `386` |
-| `NIL` | Mastermind | per-guess `data: yes,yes,yes,yes,yesn't` | positional broadcast solve |
+| `NIL` | Mastermind | **heartbleed** `data: yesn't,yesn't,…` (len == pw) | positional broadcast (freeze first — see latency note) |
 | `PHP 5.4` | Anagram | hint "I accidentally **sorted** the password: 346" | try permutations of those digits (≤3!=6) |
 | `Laika4` | Trivia | hint "It's the dog's name" (alphabetic) | *unsolved — needs a knowledge/wordlist strategy* |
 | `Factori-Os` | Math property | hint "The password is divisible by K" | multiples of K (K=1 = troll, whole space → brute) |
@@ -107,12 +107,12 @@ wrong). So don't brute the space — **broadcast** each symbol across all positi
 (`00000`, `11111`, …). Each guess resolves every position whose symbol matches, so **≤10
 guesses cracks any numeric node of any length.** neon-blade `15098` → 10 guesses, not 10⁵.
 
-**Channel caveat (2026-07-05):** that per-guess `yes/yesn't` — like *every* model's feedback — comes
-back in `heartbleed(host).logs[]`, NOT on the `authenticate` return (see "Feedback channel" below). The
-NIL positional string has **not yet been re-captured through the confirmed channel** (NIL nodes keep
-mutating out of reach before we can bleed one); the `OpenWebAccessPoint` capture is what pinned the
-channel down. So the ≤10-guess broadcast is still a design *hypothesis* live — the plumbing to feed it
-(read heartbleed, not the auth reply) doesn't exist in the solver yet.
+**Channel CONFIRMED for NIL (2026-07-05, node `smart_doorbell`).** The positional `yes/yesn't` comes
+back in `heartbleed(host).logs[]` exactly as predicted — guess `00000` → `data: "yesn't,yesn't,yesn't,
+yesn't,yesn't"` (all wrong, no `0` anywhere). Clean tokens, no noise (unlike `OpenWebAccessPoint`'s
+prose), so the existing comma-split `feedback()` parses it as-is. The broadcast algorithm was right all
+along; it only needed feeding from heartbleed instead of the (empty) auth reply. The solver now does
+this (`bleedData()` → `feedback()`); see "Solver reads the channel" below.
 
 Solver structure (refactored 2026-07-05): everything we learn about a password is a
 **predicate** in a per-host constraint set (`dnet-constraints.js`, pure/zero-RAM/unit-tested).
@@ -156,7 +156,27 @@ also a cross-node intel vector; run `harvestCandidates` + the cred/hint regexes 
 **Guess FEWER, not more.** The solver made 14 blind guesses before bleeding, and the response `ms` climbed
 7.5s → 11s across them — a soft throttle building toward 503. The whole point of the channel is to bleed
 early and constrain: one seed guess → bleed → constrain → guess the *narrowed* set, not exhaust the pool
-first. The pending rewrite should move the heartbleed read to the TOP of the adaptive phase.
+first.
+
+### Latency vs. mutation → freezeServer is load-bearing (2026-07-05)
+
+Authenticate on these hard nodes is **slow: ~8–11s per guess** (measured on both `neo%grid:2642` and
+`smart_doorbell`). A full numeric broadcast is up to ~10 guesses → **~100s**, but the net mutates every
+**~12s** and these nodes are `isStationary: false` — so an unpinned broadcast **cannot finish before the
+node migrates out from under it**. Fix: `freezeServer(host)` (2GB, pre-auth, takes a neighbor's hostname)
+pins it in place for the duration. It permanently strips the node's RAM/loot, but we only `authenticate`
++ `heartbleed` it from the neighbor, so that costs nothing here — and without it we crack *zero* of these.
+Decision (approved): **freeze-to-crack** any mobile node that reaches the adaptive phase.
+
+### Solver reads the channel (built 2026-07-05, `dnet-solve.js`)
+
+Adaptive phase rewritten: `freezeServer` mobile nodes → broadcast probe → `bleedData()` (heartbleed →
+`JSON.parse` each `logs[]` entry → match `passwordAttempted` → decoded `data`) → `feedback()`. If the
+tokens look positional (`isPositional`) run the Mastermind broadcast, re-bleeding after each guess; else
+fold the fuzzy prose into the constraint set and re-generate. Static phase is **skipped for `NIL`** (its
+defaults/pool won't hit a random broadcast password, and each ~10s guess is pre-freeze mutation exposure).
+Guesses are deduped so static+adaptive never re-spend one. **LIVE-UNVERIFIED** — parses + 31/31 spec, but
+the freeze+broadcast has not been run in-game yet.
 
 ## The single-writer rule (why the inbox exists)
 
@@ -300,7 +320,9 @@ New this layer: `alphabetic` format, empty-password ZeroLogon, and a real charis
       + `exec`s the heavy crawler/probe onto it remotely (solve deep regions). Budget readout already in
       commander. Confirmed API + the `freezeServer` companion in "Stasis, freeze, and the full API surface".
 - [x] `dnet-hbprobe.js` + `dnet-solve.js` diagnostic — **found the feedback channel** (`heartbleed().logs[]`,
-      not the auth reply; confirmed 2026-07-05 on `OpenWebAccessPoint`). Adaptive rewrite to read it: pending.
+      not the auth reply; confirmed 2026-07-05 on `OpenWebAccessPoint` + `NIL`).
+- [x] `dnet-solve.js` adaptive rewrite — reads heartbleed (`bleedData`), freezes mobile nodes, dispatches
+      positional-broadcast vs fuzzy-prose. **LIVE-UNVERIFIED** (parses + 31/31 spec; freeze+broadcast not yet run in-game).
 - [ ] instability management, earnings reporting (later)
 
 ### Loot is two kinds (confirmed live 2026-07-04)
