@@ -171,6 +171,15 @@ STATIONARY NILs (no mutation risk); on mobile ones, attempt unpinned and bail on
 pays charisma XP. Charisma grinding speeds auth over time and should eventually shrink the broadcast under
 the mutation window (the passive fix).
 
+**Reroll confirmed (2026-07-06, `global_pharmaceuticals`, a FAST ~1s/guess NIL).** Even when auth is fast
+and the node stays reachable (no 351), mutation **rerolls the password** every ~12s: positional feedback
+contradicts itself mid-sweep (a position reads digit 6 on one guess, 9 three guesses later). So a
+~10-guess broadcast accumulates feedback from two different passwords and assembles a stale, mixed answer.
+Only LOW-digit passwords (sweep finishes inside one ~12s window) crack; high-digit ones always straddle a
+reroll. The solver now **detects the reroll** (a `yes` on a position already solved with a *different*
+digit) and aborts with a `rerolled` skip instead of a bogus "possible NEW model" dump. Net: mobile NILs
+are effectively unwinnable without a pin — **accepted as a game constraint, not a solver gap.**
+
 ### Solver reads the channel (built 2026-07-05, `dnet-solve.js`)
 
 Adaptive phase rewritten: `freezeServer` mobile nodes → broadcast probe → `bleedData()` (heartbleed →

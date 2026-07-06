@@ -225,12 +225,20 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 		const fb0 = feedback({ data: data0 });
 
 		if (isPositional(fb0, det.length)) {
-			// NIL / Mastermind: broadcast each symbol across all positions, reading the positional
-			// yes/yesn't from heartbleed after each guess. Resolves every position whose symbol matches,
-			// so ≤ (alphabet size) guesses cracks any length — no brute of the space.
+			// NIL / Mastermind: broadcast each symbol across all positions, reading positional yes/yesn't
+			// from heartbleed after each guess. BUT mobile NILs REROLL their password every ~12s (proven:
+			// positional feedback contradicts itself mid-sweep — pos shows digit 6 then 9), and a full
+			// ~10-guess sweep outlasts that with no freezeServer to pin it. So detect the reroll — a "yes"
+			// at a position already solved with a DIFFERENT digit — and abort, rather than assembling a
+			// stale/mixed answer and mislabelling it a NEW model. Low-digit passwords (short sweep, done
+			// inside one window) still crack cleanly.
 			const solved = new Array(det.length).fill(null);
 			const apply = (g, fb) => {
-				for (let i = 0; i < det.length; i++) if (solved[i] == null && isYes(fb[i])) solved[i] = g[i];
+				for (let i = 0; i < det.length; i++) {
+					if (!isYes(fb[i])) continue;
+					if (solved[i] != null && solved[i] !== g[i]) { stop = "rerolled"; return; } // changed under us
+					solved[i] = g[i];
+				}
 			};
 			apply(first, fb0);
 			for (let s = 1; s < alpha.length && solved.includes(null) && !stop; s++) {
@@ -283,6 +291,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 	if (stop === "unreachable") info(`SKIP ${host} (${det.model}): direct connection required (351)  [stationary=${det.raw.isStationary}, freeze=${froze}]`);
 	else if (stop === "ratelimited") info(`BACKOFF ${host} (${det.model}): rate-limited (503) — stopped after ${tries}`);
 	else if (stop === "error") info(`SKIP ${host} (${det.model}): authenticate error (offline/migrated?)`);
+	else if (stop === "rerolled") info(`SKIP ${host} (${det.model}): password rerolled mid-broadcast — mobile NIL, can't pin (gave up after ${tries})`);
 	else ns.tprint(`FAILED ${host} (${det.model}) in ${tries} tries — possible NEW model:\n${JSON.stringify(det.raw, null, 2)}\nattempts (watch data + ms):\n${JSON.stringify(trace.slice(-8), null, 2)}`);
 	return null;
 }
