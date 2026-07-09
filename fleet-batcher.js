@@ -33,7 +33,12 @@ export async function main(ns) {
   const target = cfg.target;
   const hackFraction = cfg.hf ?? 0.1;
   const fleet = cfg.hosts;                     // [{h, r}]
-  if (!ns.fileExists("Formulas.exe", "home")) { ns.tprint("ERROR: need Formulas.exe on home"); return; }
+  // Formulas.exe makes the batch math EXACT at any hypothetical state. Without it
+  // we lean on a truth the reactive worker already relies on: once prep() has the
+  // target pinned at min-security/max-money, the live API (hackAnalyze, growthAnalyze,
+  // getWeakenTime, …) reports precisely the prepped-state numbers — because the
+  // server IS in that state. So we can plan and time a real HWGW batch either way.
+  const hasFormulas = ns.fileExists("Formulas.exe", "home");
   if (!ns.hasRootAccess(target)) { ns.tprint(`ERROR: no root on ${target}`); return; }
 
   // Make sure the workers exist on every fleet host.
@@ -48,16 +53,16 @@ export async function main(ns) {
   const cores = Math.min(...fleet.map(({ h }) => ns.getServer(h).cpuCores));
   const maxMoney = ns.getServerMaxMoney(target);
 
-  await prep(ns, target, fleet, cores);
+  await prep(ns, target, fleet, cores, hasFormulas);
 
   let id = 0, estEarned = 0, lastReport = 0;
   while (true) {
     if (!isHealthy(ns, target, hackFraction)) {
       await drain(ns, fleet);
-      await prep(ns, target, fleet, cores);
+      await prep(ns, target, fleet, cores, hasFormulas);
     }
 
-    const b = planBatch(ns, target, cores, hackFraction);
+    const b = planBatch(ns, target, cores, hackFraction, hasFormulas);
     // Only launch a batch if the WHOLE thing fits in the fleet's free RAM —
     // a partial batch would be unbalanced (hack without enough grow = drain).
     // The 5% headroom absorbs per-host fragmentation (free RAM scattered in
@@ -136,27 +141,44 @@ function isHealthy(ns, target, hackFraction) {
   return money >= maxMoney * (1 - hackFraction) * 0.5 && sec <= minSec + 5;
 }
 
-function planBatch(ns, target, cores, hackFraction) {
-  const f = ns.formulas.hacking;
-  const s = ns.getServer(target);
-  const p = ns.getPlayer();
-  s.hackDifficulty = s.minDifficulty;
-  s.moneyAvailable = s.moneyMax;
+function planBatch(ns, target, cores, hackFraction, hasFormulas) {
+  let perThread, hackThreads, stolenFrac, growThreads, wTime, gTime, hTime;
 
-  const perThread = f.hackPercent(s, p);
-  const hackThreads = Math.max(1, Math.floor(hackFraction / perThread));
-  const stolenFrac = Math.min(0.99, perThread * hackThreads);
+  if (hasFormulas) {
+    const f = ns.formulas.hacking;
+    const s = ns.getServer(target);
+    const p = ns.getPlayer();
+    s.hackDifficulty = s.minDifficulty;
+    s.moneyAvailable = s.moneyMax;
 
-  s.moneyAvailable = s.moneyMax * (1 - stolenFrac);
-  const growThreads = Math.max(1, Math.ceil(f.growThreads(s, p, s.moneyMax, cores) * 1.05));
+    perThread = f.hackPercent(s, p);
+    hackThreads = Math.max(1, Math.floor(hackFraction / perThread));
+    stolenFrac = Math.min(0.99, perThread * hackThreads);
+
+    s.moneyAvailable = s.moneyMax * (1 - stolenFrac);
+    growThreads = Math.max(1, Math.ceil(f.growThreads(s, p, s.moneyMax, cores) * 1.05));
+
+    s.moneyAvailable = s.moneyMax;
+    wTime = f.weakenTime(s, p);
+    gTime = f.growTime(s, p);
+    hTime = f.hackTime(s, p);
+  } else {
+    // Formulas-free: read the LIVE (prepped) server. Valid because the caller keeps
+    // the target at min-sec/max-money, so current-state analysis == prepped-state.
+    perThread = ns.hackAnalyze(target);                          // fraction stolen per thread
+    hackThreads = Math.max(1, Math.floor(hackFraction / Math.max(perThread, 1e-9)));
+    stolenFrac = Math.min(0.99, perThread * hackThreads);
+
+    const mult = 1 / Math.max(1 - stolenFrac, 0.01);            // grow back exactly what hack takes
+    growThreads = Math.max(1, Math.ceil(ns.growthAnalyze(target, mult, cores) * 1.05));
+
+    wTime = ns.getWeakenTime(target);
+    gTime = ns.getGrowTime(target);
+    hTime = ns.getHackTime(target);
+  }
 
   const weaken1Threads = Math.max(1, Math.ceil(hackThreads * SEC_HACK / SEC_WEAKEN));
   const weaken2Threads = Math.max(1, Math.ceil(growThreads * SEC_GROW / SEC_WEAKEN));
-
-  s.moneyAvailable = s.moneyMax;
-  const wTime = f.weakenTime(s, p);
-  const gTime = f.growTime(s, p);
-  const hTime = f.hackTime(s, p);
 
   return {
     hackThreads, growThreads, weaken1Threads, weaken2Threads, stolenFrac,
@@ -169,19 +191,47 @@ function planBatch(ns, target, cores, hackFraction) {
 }
 
 /** Bring the target to min security + max money, spreading grow/weaken across the fleet. */
-async function prep(ns, target, fleet, cores) {
-  const f = ns.formulas.hacking;
+async function prep(ns, target, fleet, cores, hasFormulas) {
   const maxMoney = ns.getServerMaxMoney(target);
   const minSec = ns.getServerMinSecurityLevel(target);
 
   while (!isPrepped(ns, target)) {
     const curSec = ns.getServerSecurityLevel(target);
     const curMoney = ns.getServerMoneyAvailable(target);
-    const s = ns.getServer(target);
-    const p = ns.getPlayer();
-    s.hackDifficulty = minSec;
 
-    let growThreads = curMoney < maxMoney ? Math.ceil(f.growThreads(s, p, maxMoney, cores)) : 0;
+    // Post prep progress so the commander's summary can show it. This fleet-batcher
+    // runs headless (its own tail is closed), so STATS_PORT is the only channel the
+    // commander is watching — same one the earnings snapshots use once we're batching.
+    try {
+      ns.tryWritePort(STATS_PORT, JSON.stringify({
+        target, prepping: true,
+        moneyPct: maxMoney > 0 ? curMoney / maxMoney : 1,
+        secOver: curSec - minSec,
+      }));
+    } catch { /* never let stats break prep */ }
+
+    // Threads to refill money and the times, computed with or without Formulas.
+    // The Formulas-free grow uses the live money ratio (maxMoney / currentMoney)
+    // and live grow/weaken times — accurate at whatever state the target is in.
+    let growThreads = 0, wTime, gTime;
+    if (hasFormulas) {
+      const f = ns.formulas.hacking;
+      const s = ns.getServer(target);
+      const p = ns.getPlayer();
+      s.hackDifficulty = minSec;
+      growThreads = curMoney < maxMoney ? Math.ceil(f.growThreads(s, p, maxMoney, cores)) : 0;
+      s.hackDifficulty = curSec;
+      wTime = f.weakenTime(s, p);
+      gTime = f.growTime(s, p);
+    } else {
+      if (curMoney < maxMoney) {
+        const mult = maxMoney / Math.max(curMoney, 1);          // guard a fully-drained server
+        growThreads = Math.ceil(ns.growthAnalyze(target, Math.max(mult, 1.001), cores));
+      }
+      wTime = ns.getWeakenTime(target);
+      gTime = ns.getGrowTime(target);
+    }
+
     let weakenThreads = Math.max(1, Math.ceil(((curSec - minSec) + growThreads * SEC_GROW) / SEC_WEAKEN));
 
     // Scale this prep pass down to the fleet's free RAM (weaken keeps priority).
@@ -190,9 +240,6 @@ async function prep(ns, target, fleet, cores) {
     growThreads = Math.floor(growThreads * ratio);
     weakenThreads = Math.max(1, Math.floor(weakenThreads * ratio));
 
-    s.hackDifficulty = curSec;
-    const wTime = f.weakenTime(s, p);
-    const gTime = f.growTime(s, p);
     const growDelay = Math.max(0, wTime - SPACER - gTime);
 
     if (growThreads > 0) allocate(ns, fleet, GROW, growThreads, target, growDelay, 0);

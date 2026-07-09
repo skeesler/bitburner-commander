@@ -23,7 +23,8 @@ const OWNED = new Set([
   "batcher-pipe.js",         // pipelined batcher
   "contract-finder.js",      // coding-contract solver (commander launches it)
   "hack.js", "grow.js", "weaken.js",   // HGW workers
-  "early-hacking-template.js",         // early-game worker
+  "early-hacking-template.js",         // early-game reactive worker
+  "xp-farm.js",                        // early-game XP farmer (weaken-for-XP)
 ]);
 
 export async function main(ns) {

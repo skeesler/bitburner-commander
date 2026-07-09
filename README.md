@@ -64,11 +64,12 @@ Nothing exotic — the rig adapts to what you have:
    in the terminal). The more you own, the more servers the rig can hack. It works
    with zero, and gets stronger as you collect them (`BruteSSH`, `FTPCrack`,
    `relaySMTP`, `HTTPWorm`, `SQLInject`).
-2. **`Formulas.exe`** *(optional but transformative)* — a ~$5b dark-web program
-   that lets scripts calculate game mechanics exactly. With it, the rig switches
-   into high-performance **batching** mode. **Without it, the rig automatically
-   falls back to a simpler mode** — so you can run it from day one and it'll
-   upgrade itself the moment you buy Formulas (just re-run it).
+2. **`Formulas.exe`** *(optional)* — a ~$5b dark-web program that lets scripts
+   calculate game mechanics exactly. The rig **batches with or without it**: without
+   Formulas it preps each target first and reads the live API (a short warm-up, then
+   full-speed batching); with Formulas the math is exact from the first cycle. So run
+   it from day one — buying Formulas later just sharpens the math (re-run to pick it
+   up).
 
 That's all. Everything runs from your `home` server.
 
@@ -108,23 +109,38 @@ and it rolls your smaller servers up to the new size automatically.
 4. Makes sure your compute is aimed at the best targets.
 5. Finds and solves **coding contracts** across the network — free money and faction reputation — unless you pass `--no-auto-solves`.
 
-It runs in one of two modes, chosen automatically:
+**Batching is the default**, with or without `Formulas.exe`. It runs **HWGW
+batches**: tightly-timed groups of four operations — **H**ack, **W**eaken,
+**G**row, **W**eaken — that land a few milliseconds apart so a server is drained
+and refilled in a continuous, efficient stream, always kept at its ideal "prepped"
+state (minimum security, maximum money). The commander groups all your machines —
+`home`, cloud servers, and every rooted world server — into **fleets** (one per
+target) and runs a distributed `fleet-batcher.js` for each: many servers pool
+their RAM onto a single juicy target instead of wasting a whole box on a scrap. A
+reserve is kept free on `home`, and the tail prints a live earnings summary (total
+this run, $/sec, best/worst fleet).
 
-- **Batching mode** (you own `Formulas.exe`) — the fast one. It runs
-  **HWGW batches**: tightly-timed groups of four operations — **H**ack,
-  **W**eaken, **G**row, **W**eaken — that land a few milliseconds apart so a
-  server is drained and refilled in a continuous, efficient stream, always kept
-  at its ideal "prepped" state (minimum security, maximum money). The commander
-  groups all your machines — `home`, cloud servers, and every rooted world server —
-  into **fleets** (one per target) and runs a distributed `fleet-batcher.js` for
-  each: many servers pool their RAM onto a single juicy target instead of wasting a
-  whole box on a scrap. A reserve is kept free on `home` so the commander and
-  contract-solver keep running, and the commander tail prints a live earnings
-  summary (total this run, $/sec, and the best/worst fleet).
-- **Fallback mode** (no `Formulas.exe`) — a simpler reactive worker
-  (`early-hacking-template.js`) that just loops "weaken if too secure, grow if too
-  poor, else hack." Less efficient, but needs no special tools and gets you
-  earning immediately.
+`Formulas.exe` just changes *how the batch math is computed*, not whether batching
+runs:
+
+- **With `Formulas.exe`** — the numbers (hack %, grow threads, operation times) are
+  solved *exactly* for the prepped state, so a fresh target batches optimally from
+  the first cycle.
+- **Without it** — the batcher **preps the target first** (weakens to min security,
+  grows to max money), then reads the *live* game API. Once a server is sitting at
+  its prepped state, `hackAnalyze`/`growthAnalyze`/`getWeakenTime` report the very
+  numbers Formulas would — so it batches for real, just after a short prep. This is
+  what carries the whole pre-Formulas early game.
+
+Any RAM the batchers **can't** use — because your target pool is thin (few crackers
+/ low hacking level) — is auto-routed into an **XP farm** (`xp-farm.js`): it weakens
+a big rooted box you can't yet *hack* purely for hacking XP, so idle capacity
+becomes the levels that open more targets.
+
+Prefer the old, dead-simple behavior? `run commander.js --reactive` forces a
+reactive deploy-all (`early-hacking-template.js`: loop "weaken if too secure, grow
+if too poor, else hack") plus the same XP soak — a safety net if a batch ever
+misbehaves.
 
 ---
 
@@ -132,12 +148,13 @@ It runs in one of two modes, chosen automatically:
 
 | File | What it is |
 |---|---|
-| **commander.js** | The one you run. Orchestrates everything; auto-selects batching vs. fallback, and prints a live earnings summary. |
+| **commander.js** | The one you run. Orchestrates everything; batches (with or without `Formulas.exe`), XP-farms idle RAM, and prints a live earnings summary. `--reactive` forces the old reactive mode. |
 | **fleet-batcher.js** | Distributed HWGW batcher — one controller drives ONE target using a whole FLEET of servers, pooling their RAM. This is what the commander launches in batching mode. |
 | **batcher-pipe.js** | Single-host pipelined HWGW batcher. Superseded by fleet-batcher for the fleet; kept as a simpler standalone/reference version. |
 | **batcher.js** | Simplest one-batch-at-a-time batcher. Easiest to read; good for learning. |
 | **hack.js / grow.js / weaken.js** | Tiny one-line workers. A batch is built from these. |
 | **early-hacking-template.js** | The reactive worker used by fallback mode. Fine on its own for a beginner. |
+| **xp-farm.js** | Weaken-for-XP worker. Fallback mode points otherwise-idle RAM at it to farm hacking XP (weaken needs only root, not level) — turning surplus capacity into the levels that unlock more targets. |
 | **purchase-servers.js** | Standalone "buy a fleet of servers" script. The commander does this too. |
 | **contract-finder.js** | Finds coding contracts network-wide and auto-solves the ~22 types it knows (never guesses blind). The commander runs it automatically; run it yourself with `--auto-solve`, or list-only with no flags. |
 | **reset-scripts.js** | Surgical reset — kills only the commander's own script family (its controllers + workers) across home + cloud + world, sparing everything else (notably `stock-trader.js`). Run before a version hand-off, or to halt the rig fast. |
@@ -184,7 +201,9 @@ and see only genuinely-new puzzle models.
   - `serverRam` — GB per cloud server to buy (default 512). It's a *default*, not a floor — pass a smaller number when you're broke.
   - `hackFraction` — how much of a server's money each batch steals (default 0.10). Smaller = smoother, more batches in flight.
   - `--no-auto-solves` — stop the commander from auto-solving coding contracts, so you can tackle them by hand.
+  - `--reactive` — force the old reactive deploy-all instead of batching (a safety net if a batch misbehaves).
 - In `commander.js`: `HOME_RESERVE_GB` reserves RAM on `home` so the commander and your own scripts always have room; `CONTRACT_EVERY` sets how often it scans for contracts.
+- **Cash-awareness** (in `commander.js`): server-buying keeps a *cash reserve* equal to the price of the next dark-web tool you don't own yet (TOR → the five crackers → Formulas), so it never drains you below your next unlock — the reserve rises on its own each time you buy the tool below it, and drops to zero once you own them all. While you're still banking for one, `TRICKLE` (default `0.10`) is the share of cash it still trickles into servers so RAM keeps creeping up. Bump `TRICKLE` if the ramp feels too slow; lower it to hoard harder.
 - In `batcher-pipe.js`: `SPACER` (gap between operations landing) and `BATCH_GAP` (gap between batch launches). Tighter = more throughput, less margin for timing jitter.
 
 ---
