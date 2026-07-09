@@ -93,9 +93,10 @@ export function parseText(text, ctx = {}) {
 	if ((m = /between\s+(\d+)\s+and\s+(\d+)/i.exec(s))) c.between = [Number(m[1]), Number(m[2])].sort((a, b) => a - b);
 	// "the password is divisible by 7" → multiples.
 	if ((m = /divisible by\s+(\d+)/i.exec(s))) c.divisibleBy = Number(m[1]);
-	// "I accidentally sorted the password: 346" / "an anagram of 346" / "The PIN uses 035" → permutation
-	// (numeric only, so far). "uses/made up of/consists of" are the same anagram model, different phrasing.
-	if ((m = /(?:sorted|anagram of|rearranged|uses|made up of|consists of)\D*?(\d+)/i.exec(s))) c.permutationOf = m[1];
+	// "I accidentally sorted the password: 346" / "an anagram of 346" / "The PIN uses 035" / "the key is
+	// made from 589" → permutation (numeric only, so far). "uses/made up of/made from/consists of" are the
+	// same anagram model, different phrasing (all: the answer is these digits in some order).
+	if ((m = /(?:sorted|anagram of|rearranged|uses|made up of|made of|made from|formed from|consists of)\D*?(\d+)/i.exec(s))) c.permutationOf = m[1];
 	// "the value of the number 'XL'" → resolved integer literal.
 	if ((m = /'([ivxlcdm]{1,8})'/i.exec(s)) || (m = /\b(?:roman numeral|value of(?: the number)?)\s+([ivxlcdm]+)\b/i.exec(s))) {
 		const v = romanToInt(m[1].toUpperCase());

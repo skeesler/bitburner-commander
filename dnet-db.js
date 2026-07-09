@@ -24,6 +24,8 @@ import { decodeEntities, harvestCandidates } from "dnet-constraints.js";
 export const DB_FILE = "dnet-db.json";
 export const INBOX_PREFIX = "dnet-in-"; // crawler report files: dnet-in-*.json
 const WORDLIST_CAP = 300; // bound the looted candidate pool (rate limits punish over-guessing)
+const HARVEST_CAP = 200; // bound the loot-history log; it's a display trail (loot is mined into passwords/
+                         // hints/wordlist at drain time), so only the recent tail is worth keeping.
 
 // Per-process sequence so one crawler's rapid-fire reports don't collide.
 let SEQ = 0;
@@ -121,6 +123,7 @@ export function applyReport(db, r) {
 		for (const cand of harvestCandidates(t)) recordWord(db, cand); // wordlists + loose creds → pool
 	}
 	if (Array.isArray(r.loot) && r.loot.length) db.harvest.push({ from: r.from, time, loot: r.loot });
+	if (db.harvest.length > HARVEST_CAP) db.harvest = db.harvest.slice(-HARVEST_CAP);
 	// Durable reach diagnostics: which nodes a crawler couldn't replicate onto (no more scroll-hunting).
 	for (const sf of r.spawnFails ?? []) db.spawnFails.push({ ...sf, from: r.from, time });
 	if (db.spawnFails.length > 40) db.spawnFails = db.spawnFails.slice(-40);
@@ -191,6 +194,51 @@ export function liveServers(db, within = FRESH_EPOCHS) {
 	return live;
 }
 
+/**
+ * Prune the ghost state the mutating net leaves behind — WITHOUT touching the crown jewels.
+ *
+ * The DarkNet mints endless theme-variant hostnames (neo%grid, neo^hub, …) and mutates every ~12s,
+ * so `servers`/`edges` are the cumulative union of everything ever seen and grow without bound; the
+ * `harvest` log grows every loot pass. Passwords are reused across resets (the whole point of the DB),
+ * so they're kept UNCONDITIONALLY. A server/edge is kept only if it still holds a password or was seen
+ * within `keepEpochs` of the current epoch; frontier hints older than `frontierMaxAgeMs` (by lastTry)
+ * are dropped as dead nodes; harvest is capped to its recent tail.
+ *
+ * PURE (no ns.*): returns a fresh pruned DB + before/after stats; the caller does the saveDB.
+ */
+export function prune(db, { now = Date.now(), keepEpochs = FRESH_EPOCHS, harvestKeep = HARVEST_CAP, frontierMaxAgeMs = 60 * 60 * 1000 } = {}) {
+	const epoch = db.epoch ?? 0;
+	const kept = emptyDB();
+	kept.epoch = epoch;
+	kept.updated = db.updated ?? 0;
+	kept.passwords = { ...(db.passwords ?? {}) }; // crown jewels — never evicted
+	kept.wordlist = [...(db.wordlist ?? [])]; // already capped at WORDLIST_CAP
+	kept.spawnFails = [...(db.spawnFails ?? [])]; // already capped at 40
+
+	const held = new Set(Object.keys(kept.passwords));
+	const fresh = (s) => epoch - (s?.lastSeenEpoch ?? -Infinity) <= keepEpochs;
+
+	for (const [host, s] of Object.entries(db.servers ?? {})) if (held.has(host) || fresh(s)) kept.servers[host] = s;
+	// Edges only make sense alongside a server we kept (or a password we hold).
+	for (const [host, e] of Object.entries(db.edges ?? {})) if (host in kept.servers || held.has(host)) kept.edges[host] = e;
+	// Frontier: drop anything already cracked, plus long-stale-by-time (dead nodes). Missing lastTry ⇒ keep.
+	for (const [host, f] of Object.entries(db.frontier ?? {})) {
+		if (held.has(host)) continue;
+		if (now - (f.lastTry ?? now) <= frontierMaxAgeMs) kept.frontier[host] = f;
+	}
+	kept.harvest = (db.harvest ?? []).slice(-harvestKeep);
+
+	const pair = (a, b) => [Object.keys(a ?? {}).length, Object.keys(b ?? {}).length];
+	const stats = {
+		servers: pair(db.servers, kept.servers),
+		edges: pair(db.edges, kept.edges),
+		frontier: pair(db.frontier, kept.frontier),
+		harvest: [(db.harvest ?? []).length, kept.harvest.length],
+		passwords: Object.keys(kept.passwords).length,
+	};
+	return { db: kept, stats };
+}
+
 /** One-line-per-section summary, for `run dnet-db.js`. */
 export function summarize(db) {
 	const n = (o) => Object.keys(o).length;
@@ -207,7 +255,24 @@ export function summarize(db) {
 	].join("\n");
 }
 
-/** Run directly to inspect the current DB. */
+/**
+ * Run directly to inspect the current DB, or `prune` it.
+ *   run dnet-db.js                inspect (summary only, no writes)
+ *   run dnet-db.js prune          drop stale ghosts (keeps passwords), save, show before/after
+ *   run dnet-db.js prune 40       same, but keep servers seen within 40 epochs (default 20)
+ */
 export async function main(ns) {
-	ns.tprint("\n" + summarize(loadDB(ns)));
+	const db = loadDB(ns);
+	if (!ns.args.includes("prune")) return ns.tprint("\n" + summarize(db));
+
+	const keepEpochs = Number(ns.args.find((a) => /^\d+$/.test(String(a)))) || FRESH_EPOCHS;
+	const { db: pruned, stats } = prune(db, { keepEpochs });
+	saveDB(ns, pruned);
+	const row = (label, [before, after]) => `  ${label.padEnd(9)}: ${before} → ${after}  (−${before - after})`;
+	ns.tprint(
+		`\nPruned darknet DB (keepEpochs=${keepEpochs}; passwords always kept):\n` +
+			[row("servers", stats.servers), row("edges", stats.edges), row("frontier", stats.frontier), row("harvest", stats.harvest)].join("\n") +
+			`\n  passwords: ${stats.passwords} (kept)\n\n` +
+			summarize(pruned),
+	);
 }

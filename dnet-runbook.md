@@ -27,6 +27,7 @@ reach `darkweb`.
 | `run dnet-step.js darkweb dnet-solve.js <neighbor>` | Spot-crack one named node (direct neighbor only, else 351). |
 | `run dnet-step.js darkweb dnet-recon.js` | Dump the shape of darkweb's neighbors (probe helper). |
 | `run dnet-db.js` | Print the current DB, no draining. |
+| `run dnet-db.js prune [keepEpochs]` | Clean up the DB: drop stale ghost servers/edges + old frontier hints + trim the harvest log, **keeping all passwords**. Shows before/after. Optional `keepEpochs` (default 20) = how recent a server must be to survive. The commander also auto-prunes once the catalog passes ~500 nodes. |
 | `run dnet-step.js darkweb dnet-hbprobe.js [host] [guesses…]` | **Throwaway diagnostic** — guess a node, dump its `heartbleed` after each guess. This is what pinned down that feedback lives in `heartbleed().logs[]`, not the auth reply. Delete once the solver reads the channel. |
 
 ## Where output shows up

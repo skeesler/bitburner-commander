@@ -68,6 +68,15 @@ console.log("\nArchetypes (design-doc table) — answer must appear as a candida
 	ok("PHP 5.4 'uses' → every candidate is a permutation of 035", c.length > 0 && c.every((v) => [...v].sort().join("") === "035"), JSON.stringify(c));
 }
 
+// PHP 5.4 variant — "The key is made from 589" (field FAILED, h4cker;cit4de1, 2026-07-09) → perms of 589.
+// New phrasing ("made from", non-"password/pin" noun "key"); must map to the same anagram model.
+{
+	const c = cands({ hint: "The key is made from 589", length: 3, format: "numeric" });
+	const allPerms = ["589", "598", "859", "895", "958", "985"].every((p) => has(c, p));
+	ok("PHP 5.4 'made from' → all 6 perms of 589", allPerms, JSON.stringify(c.slice(0, 6)));
+	ok("PHP 5.4 'made from' → every candidate is a permutation of 589", c.length > 0 && c.every((v) => [...v].sort().join("") === "589"), JSON.stringify(c));
+}
+
 // Factori-Os — "divisible by 7" → only multiples of 7 (of the right length).
 {
 	const c = cands({ hint: "The password is divisible by 7", length: 3, format: "numeric" });

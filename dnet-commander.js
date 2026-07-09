@@ -47,9 +47,11 @@ export async function main(ns) {
 	};
 	armMutation();
 
-	let printed = false, quiet = 0, announcedIdle = false, stageIdx = 0, lastMutT = 0;
+	let printed = false, quiet = 0, announcedIdle = false, stageIdx = 0, lastMutT = 0, lastPruneEpoch = 0;
 	const IDLE_TICKS = 15; // ~60s with no new REPORTS before a pass is "settled" (deep looters can
 	                       // leave long gaps mid-run — a short threshold false-fires "finished")
+	const PRUNE_AT = 500;    // only bother auto-pruning once the catalog grows past this (passwords kept)
+	const PRUNE_EVERY = 20;  // …and then at most once per 20 epochs (~4 min), not every ~12s mutation
 	do {
 		if (loop) {
 			const current = ns.read(self);
@@ -59,7 +61,7 @@ export async function main(ns) {
 			}
 		}
 
-		const d = db.loadDB(ns);
+		let d = db.loadDB(ns);
 		const { merged } = drainInbox(ns, d);
 		let bumped = false;
 		if (mutated) {
@@ -75,7 +77,22 @@ export async function main(ns) {
 			// would otherwise keep the "pass finished" signal from ever firing.
 			ns.print(`⟳ mutation → epoch ${d.epoch} (${gap} since last)`);
 		}
-		if (merged || bumped) db.saveDB(ns, d);
+		if (merged || bumped) {
+			// Keep the DB bounded across long (esp. auto-pipeline) runs: the mutating net mints endless
+			// hostname variants, so servers/edges grow without bound. Once the catalog gets large, drop the
+			// stale ghosts (never passwords) — pure + cheap, logged to the tail only. Manual equivalent:
+			// `run dnet-db.js prune`.
+			// Gate to once per PRUNE_EVERY epochs (~4 min), and only log when it actually dropped something —
+			// a permanently-large catalog would otherwise re-prune every ~12s mutation, usually to no effect.
+			if (Object.keys(d.servers).length > PRUNE_AT && (d.epoch ?? 0) - lastPruneEpoch >= PRUNE_EVERY) {
+				const { db: pd, stats } = db.prune(d);
+				d = pd;
+				lastPruneEpoch = d.epoch ?? 0;
+				const dropped = ["servers", "edges", "frontier", "harvest"].reduce((n, k) => n + stats[k][0] - stats[k][1], 0);
+				if (dropped > 0) ns.print(`⌫ pruned ghosts → servers ${stats.servers[0]}→${stats.servers[1]}, edges ${stats.edges[0]}→${stats.edges[1]}, frontier ${stats.frontier[0]}→${stats.frontier[1]}, harvest ${stats.harvest[0]}→${stats.harvest[1]}  (passwords kept: ${stats.passwords})`);
+			}
+			db.saveDB(ns, d);
+		}
 
 		// Idle detection keys off REPORTS ONLY. quiet resets on a merge; mutations are ignored here.
 		if (merged) { quiet = 0; announcedIdle = false; } else quiet++;
