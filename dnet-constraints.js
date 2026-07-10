@@ -96,7 +96,7 @@ export function parseText(text, ctx = {}) {
 	// "I accidentally sorted the password: 346" / "an anagram of 346" / "The PIN uses 035" / "the key is
 	// made from 589" → permutation (numeric only, so far). "uses/made up of/made from/consists of" are the
 	// same anagram model, different phrasing (all: the answer is these digits in some order).
-	if ((m = /(?:sorted|anagram of|rearranged|uses|made up of|made of|made from|formed from|consists of)\D*?(\d+)/i.exec(s))) c.permutationOf = m[1];
+	if ((m = /(?:sorted|shuffled|anagram of|rearranged|uses|made up of|made of|made from|formed from|consists of)\D*?(\d+)/i.exec(s))) c.permutationOf = m[1];
 	// "the value of the number 'XL'" → resolved integer literal.
 	if ((m = /'([ivxlcdm]{1,8})'/i.exec(s)) || (m = /\b(?:roman numeral|value of(?: the number)?)\s+([ivxlcdm]+)\b/i.exec(s))) {
 		const v = romanToInt(m[1].toUpperCase());

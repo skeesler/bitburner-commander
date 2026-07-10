@@ -77,6 +77,15 @@ console.log("\nArchetypes (design-doc table) — answer must appear as a candida
 	ok("PHP 5.4 'made from' → every candidate is a permutation of 589", c.length > 0 && c.every((v) => [...v].sort().join("") === "589"), JSON.stringify(c));
 }
 
+// PHP 5.4 variant — "The password is shuffled 446" (field FAILED, 2026-07-09). Repeated digit ⇒ 3 distinct
+// perms (446/464/644), and the dedupe must not emit "446"×multiple.
+{
+	const c = cands({ hint: "The password is shuffled 446", length: 3, format: "numeric" });
+	const allPerms = ["446", "464", "644"].every((p) => has(c, p));
+	ok("PHP 5.4 'shuffled' → all 3 perms of 446", allPerms, JSON.stringify(c));
+	ok("PHP 5.4 'shuffled' → every candidate is a permutation of 446 (deduped)", c.length > 0 && c.every((v) => [...v].sort().join("") === "446") && new Set(c).size === c.length, JSON.stringify(c));
+}
+
 // Factori-Os — "divisible by 7" → only multiples of 7 (of the right length).
 {
 	const c = cands({ hint: "The password is divisible by 7", length: 3, format: "numeric" });
