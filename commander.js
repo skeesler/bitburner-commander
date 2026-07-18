@@ -43,7 +43,11 @@ const TICK = 10000;            // control-loop interval, ms
 const CONTRACT_EVERY = 6;      // run the contract solver every N ticks (~once a minute)
 const SUMMARY_EVERY = 3;       // print the earnings summary every N ticks (~30s)
 const MIN_CHANCE = 0.5;        // skip targets whose prepped hack chance is below this
-const TRICKLE = 0.10;          // while banking for the next tool, still invest this share of cash into servers
+const TRICKLE = 0.05;          // while banking for the next tool, still invest this share of cash into servers
+const BATCH_MIN_POOL = 256;    // GB of usable pool before AUTO mode first tries batching — below this,
+                               // batching's prep RAM starves the steal-batches and earns $0, so reactive wins
+const STALL_TICKS = 15;        // batching ticks (~150s) with FLAT hack income before auto-falling to reactive
+const MAX_DEMOTIONS = 2;       // after this many failed batch attempts, stay reactive for the rest of the run
 
 export async function main(ns) {
   ns.disableLog("ALL");
@@ -65,10 +69,10 @@ export async function main(ns) {
 
   ns.ui.openTail();
   const sizeLabel = autoSize ? "auto-sized" : fmtRam(fixedRam);
-  const mode = forceReactive ? "REACTIVE (forced)"
-             : hasFormulas   ? "BATCHING (Formulas: exact math)"
-             :                 "BATCHING (Formulas-free: prep-then-batch)";
-  ns.print(`Commander online — ${mode}. Servers: ${sizeLabel}, ${Math.round(hackFraction * 100)}%/batch.`);
+  const modeLabel = forceReactive
+    ? "REACTIVE (forced)"
+    : `AUTO reactive→batching (${hasFormulas ? "Formulas: exact math" : "Formulas-free: prep-then-batch"})`;
+  ns.print(`Commander online — ${modeLabel}. Servers: ${sizeLabel}, ${Math.round(hackFraction * 100)}%/batch.`);
   ns.print(`Coding-contract auto-solve: ${autoSolve ? "ON" : "OFF (--no-auto-solves)"}`);
 
   // Self-reload: snapshot our own source. If the on-disk file later diverges (a fresh edit synced
@@ -84,6 +88,14 @@ export async function main(ns) {
   const RAMP_TICKS = 6; // ~60s sustained (at TICK=10s) before the target grows
   let committedRam = 0, rampTicks = 0, rampMin = 0;
   const fleetStats = new Map();   // target -> latest earnings snapshot from its fleet-batcher
+
+  // AUTO batch/reactive. Reactive is mandatory on a thin pool: batching's prep RAM starves the
+  // steal-batches and earns $0 (see AGENTS.md — this is why --reactive was needed at BitNode start).
+  // So start reactive and PROMOTE to batching once the pool is fat enough to afford prep; DEMOTE
+  // (raising the bar) if hack income stalls at that size. --reactive pins reactive; auto only otherwise.
+  let activeMode = "reactive";      // "reactive" | "batch" — the deploy mode we're actually running
+  let batchFloor = BATCH_MIN_POOL;  // usable-pool GB needed to (re)try batching; rises on each demotion
+  let stall = 0, lastHackIncome = 0, demotions = 0;
   while (true) {
     if (ns.read(self) !== baseline && ns.read(self)) {
       ns.print(`↻ ${self} changed on disk — reloading into the new version.`);
@@ -126,10 +138,41 @@ export async function main(ns) {
         ns.print(`auto-size → ${fmtRam(buyRam)}/server (~$${fmt(ns, each)} each, ~$${fmt(ns, each * ns.cloud.getServerLimit())} full fleet)`);
       }
     }
-    maybeBuyServer(ns, buyRam, spendable);
-    // Batch whenever there's a viable target (Formulas or not), and XP-farm every
-    // host no fleet claimed. --reactive forces the old reactive deploy-all instead.
-    const batching = !forceReactive;
+    // Buy servers into free slots always; but the delete-and-rebuy UPGRADE of an
+    // already-full fleet is a wasteful early-game spend (deletes aren't refunded,
+    // and it briefly kills the batcher on that host). Hold it back until we're both
+    // out of --reactive AND own Formulas — i.e. suppress upgrades if EITHER applies.
+    const allowUpgrade = !forceReactive || hasFormulas;
+    maybeBuyServer(ns, buyRam, spendable, allowUpgrade);
+
+    // Pick the deploy mode. --reactive pins reactive; otherwise adapt: PROMOTE to batching once
+    // the pool can afford prep, DEMOTE back (raising the bar, up to MAX_DEMOTIONS) if hack income
+    // stalls there. Switching modes tears down the OTHER mode's workers first — a batcher and
+    // reactive workers on the same target fight over its state and both earn nothing (see README).
+    if (!forceReactive) {
+      const income = hackIncome(ns);
+      if (activeMode === "reactive") {
+        if (demotions < MAX_DEMOTIONS && poolRam(ns, all) >= batchFloor) {
+          const n = clearWorkers(ns, all, fleetStats);
+          activeMode = "batch"; stall = 0; lastHackIncome = income;
+          ns.print(`↑ pool ≥ ${fmtRam(batchFloor)} — switching to BATCHING (cleared ${n} reactive worker(s)).`);
+        }
+      } else if (income > lastHackIncome) {
+        stall = 0; lastHackIncome = income;                 // batching is earning — stay
+      } else if (++stall >= STALL_TICKS) {
+        batchFloor = Math.max(batchFloor + 1, Math.ceil(poolRam(ns, all) * 1.5));
+        demotions++;
+        const n = clearWorkers(ns, all, fleetStats);
+        activeMode = "reactive"; stall = 0;
+        ns.print(`↓ batching earned $0 for ~${Math.round(STALL_TICKS * TICK / 1000)}s — back to REACTIVE ` +
+                 `(cleared ${n} batcher/worker(s))` +
+                 `${demotions >= MAX_DEMOTIONS ? "; pinned reactive for this run." : `; will retry above ${fmtRam(batchFloor)}.`}`);
+      }
+    }
+
+    // Batch whenever we're in batch mode, and XP-farm every host no fleet claimed. Reactive mode
+    // (forced, or auto on a thin/stalled pool) runs the old reactive deploy-all instead.
+    const batching = !forceReactive && activeMode === "batch";
     if (batching) {
       const claimed = ensureFleets(ns, all, hackFraction, hasFormulas);
       farmIdleRam(ns, all, claimed);
@@ -144,11 +187,11 @@ export async function main(ns) {
     const total = all.filter(s => !pservs.has(s)).length;
     if (rooted !== lastRooted) { ns.print(`hacked ${rooted}/${total} servers`); lastRooted = rooted; }
 
-    // Earnings summary (batching mode): total hacked $, rate, best/worst fleet.
-    if (batching) {
-      drainStats(ns, fleetStats);
-      if (tick % SUMMARY_EVERY === 0) printSummary(ns, fleetStats);
-    }
+    // Earnings summary (both modes): total hacked $, rate, and — when batching — best/worst fleet.
+    // Runs in reactive too so the run/all-time baseline (and its reset self-heal) stay live
+    // regardless of mode; drainStats only matters when fleet-batchers are actually posting.
+    if (batching) drainStats(ns, fleetStats);
+    if (tick % SUMMARY_EVERY === 0) printSummary(ns, fleetStats, activeMode);
 
     tick++;
     await ns.sleep(TICK);
@@ -198,8 +241,10 @@ function rootAll(ns, all) {
  *  If the server limit is already full of UNDERSIZED servers, upgrade the
  *  smallest one instead (delete + rebuy at buyRam) — one per tick, so the
  *  fleet rolls over to full size gracefully. Note: deleting a purchased
- *  server is not refunded, and briefly kills the batcher running on it. */
-function maybeBuyServer(ns, buyRam, spendable) {
+ *  server is not refunded, and briefly kills the batcher running on it.
+ *  When allowUpgrade is false (early game: --reactive OR pre-Formulas), we
+ *  still fill empty slots but skip that delete-and-rebuy upgrade entirely. */
+function maybeBuyServer(ns, buyRam, spendable, allowUpgrade = true) {
   const names = ns.cloud.getServerNames();
   const limit = ns.cloud.getServerLimit();
   const cost = ns.cloud.getServerCost(buyRam);
@@ -214,6 +259,10 @@ function maybeBuyServer(ns, buyRam, spendable) {
     }
     return;
   }
+
+  // Fleet is full. Upgrading means deleting + rebuying the smallest undersized
+  // server — held back in the early game (see allowUpgrade at the call site).
+  // if (!allowUpgrade) return;
 
   // At the limit: find the smallest server below target size and upgrade it.
   let smallest = null, smallestRam = Infinity;
@@ -391,6 +440,40 @@ function saturationRam(ns, target, hackFraction, hasFormulas) {
 }
 
 /** Drain the stats port into the fleetStats map (latest snapshot per target). */
+/** Hacking income since install (the game's own number). Guarded — returns 0 if the API
+ *  isn't available, so the stall detector simply never fires instead of throwing. */
+function hackIncome(ns) {
+  try { return ns.getMoneySources().sinceInstall.hacking; } catch { return 0; }
+}
+
+/** Total usable RAM (GB) across the work pool: home (minus its reserve) + cloud servers +
+ *  every rooted world server. AUTO mode uses this to judge whether the pool is fat enough to
+ *  afford batching's prep without starving the steal-batches. */
+function poolRam(ns, all) {
+  const pservs = new Set(ns.cloud.getServerNames());
+  let ram = Math.max(0, ns.getServerMaxRam("home") - HOME_RESERVE_GB);
+  for (const h of all) {
+    if (h === "home") continue;
+    if (!pservs.has(h) && !ns.hasRootAccess(h)) continue;   // unrooted world server: unusable RAM
+    ram += ns.getServerMaxRam(h);
+  }
+  return ram;
+}
+
+/** Tear down the commander's whole worker family across the network so the OTHER deploy mode can
+ *  repopulate from a clean slate on a mode switch — a batcher and reactive workers on the same
+ *  target fight over its state and both earn nothing (see README). Also clears stale fleet stats.
+ *  Returns how many processes were killed. */
+function clearWorkers(ns, all, fleetStats) {
+  const family = new Set([FLEET, "batcher.js", "batcher-pipe.js", HACK, GROW, WEAKEN, WORKER, XP_WORKER]);
+  let n = 0;
+  for (const host of new Set([...all, ...ns.cloud.getServerNames(), "home"])) {
+    for (const p of ns.ps(host)) if (family.has(p.filename)) { ns.kill(p.pid); n++; }
+  }
+  fleetStats.clear();
+  return n;
+}
+
 function drainStats(ns, fleetStats) {
   try {
     for (;;) {
@@ -416,7 +499,7 @@ function fmt(ns, n) {
 
 /** Earnings summary: this-run total + average rate, all-time total, and the
  *  best/worst fleet (scoped to this run). Written so it can NEVER throw. */
-function printSummary(ns, fleetStats) {
+function printSummary(ns, fleetStats, activeMode = "batch") {
   const entries = [...fleetStats.values()];
   const earning = entries.filter(x => !x.prepping);   // posting real earnings
   const prepping = entries.filter(x => x.prepping);    // still warming up (money/sec progress)
@@ -432,14 +515,26 @@ function printSummary(ns, fleetStats) {
   }
 
   const nowT = Date.now();
-  if (_startIncome === null) { _startIncome = allTime; _startT = nowT; }   // baseline at commander start
+  // Baseline the "this run" counter on first sight — and RE-baseline whenever all-time
+  // income has DROPPED below it. sinceInstall.hacking only grows within a run, so a drop
+  // means an aug-install / BitNode entry reset it back to ~0, leaving a stale pre-reset
+  // baseline that would otherwise print a huge negative "run" total. The drop IS the reset
+  // signal, so we detect it without spending RAM on an extra ns.* call (e.g. getResetInfo).
+  if (_startIncome === null || allTime < _startIncome) {
+    _startIncome = allTime;
+    _startT = nowT;
+    _fleetBase.clear();   // per-fleet "this run" baselines are stale after a reset too
+  }
   const run = allTime - _startIncome;
   const rate = run / Math.max(1, (nowT - _startT) / 1000);   // run AVERAGE $/s — robust, never stuck at 0
 
   const head = `hacked: $${fmt(ns, run)} run (~$${fmt(ns, rate)}/s), $${fmt(ns, allTime)} all-time`;
 
   if (!earning.length) {
-    ns.print(`${head} | ${prepping.length ? `${prepping.length} fleet(s) prepping` : "fleets warming up"}`);
+    const suffix = activeMode === "reactive" ? "reactive mode"
+                 : prepping.length ? `${prepping.length} fleet(s) prepping`
+                 : "fleets warming up";
+    ns.print(`${head} | ${suffix}`);
   } else {
     // Per-fleet "this run" = estEarned minus its value when first seen this run, so a
     // fleet that outlived a commander restart doesn't report its entire lifetime.

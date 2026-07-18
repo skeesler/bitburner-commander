@@ -42,6 +42,16 @@ which you decode → `authenticate`. The rig is built and partly field-confirmed
 (the *why*) and `dnet-runbook.md` (the *how*) are the source of truth** — read them before touching
 darknet code. API surface re-derived from the official 3.0 docs, now being confirmed node-by-node.
 
+## Field findings
+
+- **Batching's prep RAM starves a thin pool → earns $0.** At a BitNode start (esp. BN4, whose
+  hacking penalty stretches prep times) the fleet-batcher weakens/grows a target to prepped state
+  *before* it steals a cent; on a small pool (home + tiny world boxes, no cloud servers yet) prep
+  eats all the RAM and the steal never runs — `sinceInstall.hacking` sits at $0. Reactive mode
+  (`early-hacking-template.js`) earns immediately on any pool. Commander now AUTO-switches: starts
+  reactive, promotes to batching once the usable pool clears `BATCH_MIN_POOL`, demotes back (raising
+  the bar) if hack income stalls. `--reactive` still force-pins the old behavior.
+
 ## Conventions
 
 - Scripts target `home` as the primary host and are meant to be copied there wholesale.
