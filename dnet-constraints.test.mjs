@@ -99,6 +99,13 @@ console.log("\nArchetypes (design-doc table) — answer must appear as a candida
 	ok("BellaCuore → 40 in", has(c, "40"), JSON.stringify(c.slice(0, 4)));
 }
 
+// BellaCuore long-numeral (field FAILED, 2026-07-09): 'CCCLXXXIII' = 383, 10 chars — blew the old
+// {1,8} quoted-roman cap so no literal was produced and the crawler guessed randomly for 17 tries.
+{
+	const c = cands({ hint: "The password is the value of the number 'CCCLXXXIII'", data: "CCCLXXXIII", length: 3, format: "numeric" });
+	ok("BellaCuore long numeral 'CCCLXXXIII' → 383 in", has(c, "383"), JSON.stringify(c.slice(0, 4)));
+}
+
 // OctantVoxel — base conversion: "the base 9 number 548 in base 10" → 449 (5·81 + 4·9 + 8).
 {
 	const c = cands({ hint: "the password is the base 9 number 548 in base 10", length: 3, format: "numeric" });

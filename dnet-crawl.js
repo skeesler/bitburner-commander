@@ -126,7 +126,7 @@ export async function main(ns) {
 		if (pid) spawned++;
 		else {
 			rep.spawnFails.push({ host, reason: "exec-failed", blockedRam: det.blockedRam });
-			ns.tprint(`[${here}] exec on ${host} (${det.modelId}) failed — crawler needs ~${crawlerRam.toFixed(1)}GB, node blocked=${det.blockedRam}GB (won't fit)`);
+			info(`[${here}] exec on ${host} (${det.modelId}) failed — crawler needs ~${crawlerRam.toFixed(1)}GB, node blocked=${det.blockedRam}GB (won't fit)`);
 		}
 	}
 

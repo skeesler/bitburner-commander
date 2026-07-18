@@ -6,10 +6,12 @@
  * It's the single writer of the DB (see darknet-design.md), and the source of truth the
  * upcoming light loot pass reads passwords from.
  *
- *   run dnet-commander.js           drain once and show the map
- *   run dnet-commander.js loop      keep draining every few seconds while a crawl runs
- *   run dnet-commander.js loop auto self-drive: re-launch crawl → loot → scout each time the net
- *                                   goes quiet, so the book stays fresh against constant mutation
+ *   run dnet-commander.js           self-drive the whole flywheel: loop + drain + auto-relaunch
+ *                                   crawl → loot → scout each time the net goes quiet, quietly
+ *                                   (auto + loop + --suppress-info are all ON by default now)
+ *   run dnet-commander.js once      drain a single pass, show the map, and exit
+ *   run dnet-commander.js no-auto   loop + drain, but don't self-drive the pipeline
+ *   run dnet-commander.js --verbose restore the full terminal chatter (undo default --suppress-info)
  *
  * In loop mode it SELF-RELOADS: if you edit this file (a new version syncs onto home), the running
  * loop notices its own source changed and ns.spawn's a fresh copy of itself — no kill+rerun needed.
@@ -20,9 +22,15 @@ import { decodeEntities } from "dnet-constraints.js";
 
 export async function main(ns) {
 	ns.disableLog("ALL");
-	const auto = ns.args.includes("auto"); // self-drive the crawl → loot → scout pipeline
-	const loop = auto || ns.args.includes("loop");
-	const suppressInfo = ns.args.includes("--suppress-info"); // quiet the terminal + forward the flag to stages
+	// Defaults are now ON: self-driving auto-pipeline, looping, and a quiet terminal — a bare
+	// `run dnet-commander.js` runs the whole flywheel. Opt out per piece:
+	//   once      → drain a single pass and exit (no loop, no auto)
+	//   no-auto   → keep looping + draining, but don't self-drive crawl → loot → scout
+	//   --verbose → restore the full terminal chatter (undo the default --suppress-info)
+	const once = ns.args.includes("once");
+	const loop = !once; // loop unless told to do a single pass
+	const auto = loop && !ns.args.includes("no-auto"); // self-drive the crawl → loot → scout pipeline
+	const suppressInfo = !ns.args.includes("--verbose"); // quiet the terminal + forward the flag to stages
 	const info = suppressInfo ? () => {} : (m) => ns.tprint(m); // (named suppressInfo — `quiet` is the idle counter below)
 	ns.ui.openTail();
 	if (auto) ns.print("Auto-pipeline ON: cycling crawl → loot → scout, re-launching each time the net goes quiet.");

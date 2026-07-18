@@ -97,8 +97,9 @@ export function parseText(text, ctx = {}) {
 	// made from 589" → permutation (numeric only, so far). "uses/made up of/made from/consists of" are the
 	// same anagram model, different phrasing (all: the answer is these digits in some order).
 	if ((m = /(?:sorted|shuffled|anagram of|rearranged|uses|made up of|made of|made from|formed from|consists of)\D*?(\d+)/i.exec(s))) c.permutationOf = m[1];
-	// "the value of the number 'XL'" → resolved integer literal.
-	if ((m = /'([ivxlcdm]{1,8})'/i.exec(s)) || (m = /\b(?:roman numeral|value of(?: the number)?)\s+([ivxlcdm]+)\b/i.exec(s))) {
+	// "the value of the number 'XL'" → resolved integer literal. Cap at 15 chars: the longest
+	// standard numeral (MMMDCCCLXXXVIII = 3888) — 'CCCLXXXIII' (383, 10 chars) blew an older {1,8}.
+	if ((m = /'([ivxlcdm]{1,15})'/i.exec(s)) || (m = /\b(?:roman numeral|value of(?: the number)?)\s+'?([ivxlcdm]+)'?\b/i.exec(s))) {
 		const v = romanToInt(m[1].toUpperCase());
 		if (v > 0) {
 			c.literals.push(String(v));
