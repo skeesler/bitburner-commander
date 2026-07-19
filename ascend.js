@@ -191,11 +191,13 @@ function buyNeuroFlux(ns, sing, joined, spendable, dry) {
 
 /* ---- 4. faction work ------------------------------------------------------- */
 
-/** If we're not already working a faction, start background work for one that still
- *  gates an unowned aug on reputation — so the grind buys us the next unlock. */
+/** When you're otherwise IDLE, start background work for a faction that still gates an unowned
+ *  aug on reputation — so the grind buys us the next unlock. Defers to ANYTHING you're already
+ *  doing: a crime in the slums, company work, studying, the gym, or faction work we already
+ *  launched. (It used to defer only to faction work, so a crime got yanked back to a faction on
+ *  the next tick.) getCurrentWork() returns null when idle. */
 function maybeWork(ns, sing, joined, dry) {
-  const cur = sing.getCurrentWork();
-  if (cur && cur.type === "FACTION") return; // already grinding a faction; leave it
+  if (sing.getCurrentWork()) return; // busy with something you started — leave it alone
   const owned = new Set(sing.getOwnedAugmentations(true));
   for (const fac of joined) {
     const rep = sing.getFactionRep(fac);
