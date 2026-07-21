@@ -2,14 +2,14 @@
  *
  *  ASCEND — the augmentation flywheel, run as a background loop.
  *
- *      run ascend.js [--install] [--formulas] [--join-all] [--no-join]
+ *      run ascend.js [--install] [--no-formulas] [--join-all] [--no-join]
  *                    [--no-work] [--no-nfg] [--reserve N] [--dry] [--cb script]
  *
  *  This is the "buy every aug → install → re-grind with fatter multipliers" loop
  *  we used to do by hand, turned into a script via the Singularity API (ns.singularity.*).
  *  Every tick it:
- *    1. Buys the TOR router, then every port cracker, as soon as each is affordable
- *       (add --formulas to also grab Formulas.exe). Uses the game's OWN darkweb
+ *    1. Buys the TOR router, then every port cracker AND Formulas.exe, as soon as each
+ *       is affordable (--no-formulas skips Formulas). Uses the game's OWN darkweb
  *       program list, so it buys with whatever exact name strings your version reports.
  *    2. Accepts faction invitations. By default it SKIPS factions that have enemies
  *       (joining them can permanently lock you out of a rival) — pass --join-all to
@@ -19,7 +19,11 @@
  *       --no-work leaves your player action alone.
  *    4. Buys every augmentation you have the rep + cash + prerequisites for, most-
  *       expensive-first (respects the escalating price multiplier), then pours
- *       leftover cash into NeuroFlux Governor (--no-nfg to skip).
+ *       leftover cash into NeuroFlux Governor (--no-nfg to skip). But it HOLDS NFG
+ *       (the stacking aug) while any joined faction still has an unowned real aug —
+ *       stacking NFG early drains the cash you're saving for a pricier aug and the
+ *       rep you're grinding for a gated one. Pass --install to release it (you've
+ *       decided to reset, so dumping leftover cash into NFG is what you want).
  *    5. ONLY IF you pass --install: when there's nothing left to buy this pass, it
  *       installs (which resets you to level 1 and wipes cloud servers + programs) and
  *       relaunches your commander via the callback. Without --install it just keeps
@@ -45,7 +49,7 @@ export async function main(ns) {
   ns.disableLog("ALL");
   const flags = ns.flags([
     ["install", false],    // actually pull the install trigger when out of buys
-    ["formulas", false],   // also buy Formulas.exe from the darkweb
+    ["no-formulas", false], // skip Formulas.exe (bought by default — you always want it)
     ["join-all", false],   // join even factions that have enemies
     ["no-join", false],    // don't auto-join at all
     ["no-work", false],    // don't auto-work factions for rep
@@ -68,8 +72,8 @@ export async function main(ns) {
   while (true) {
     const spendable = () => Math.max(0, ns.getServerMoneyAvailable("home") - reserve);
 
-    // 1. Darkweb tools — TOR first, then crackers (+ optional Formulas).
-    buyTools(ns, sing, spendable, flags["formulas"], dry);
+    // 1. Darkweb tools — TOR first, then crackers (+ Formulas unless --no-formulas).
+    buyTools(ns, sing, spendable, !flags["no-formulas"], dry);
 
     // 2. Factions — accept invitations (skipping enemy-bearing ones unless --join-all).
     if (!flags["no-join"]) joinFactions(ns, sing, flags["join-all"], dry);
@@ -78,7 +82,10 @@ export async function main(ns) {
     const player = ns.getPlayer();
     const joined = player.factions;
     const bought = buyAugs(ns, sing, joined, spendable, dry);
-    if (!flags["no-nfg"]) buyNeuroFlux(ns, sing, joined, spendable, dry);
+    // Hold NeuroFlux (the stacking aug) while any joined faction still has an unowned real
+    // aug — otherwise it eats the cash you're banking for a pricier aug. --install releases it.
+    const nfgHeld = !flags["install"] && anythingReachable(ns, sing, joined);
+    if (!flags["no-nfg"] && !nfgHeld) buyNeuroFlux(ns, sing, joined, spendable, dry);
 
     // 4. Work a faction that still gates an aug on rep (background, no focus stolen).
     if (!flags["no-work"]) maybeWork(ns, sing, joined, dry);
@@ -92,7 +99,7 @@ export async function main(ns) {
       return; // installAugmentations resets the game; we won't get here, but be explicit.
     }
 
-    status(ns, sing, joined, reserve);
+    status(ns, sing, joined, reserve, nfgHeld && !flags["no-nfg"]);
     await ns.sleep(TICK);
   }
 }
@@ -225,12 +232,13 @@ function anythingReachable(ns, sing, joined) {
 
 /* ---- status + formatting --------------------------------------------------- */
 
-function status(ns, sing, joined, reserve) {
-  const owned = sing.getOwnedAugmentations(true).length;
+function status(ns, sing, joined, reserve, nfgHeld) {
+  const installed = sing.getOwnedAugmentations(false).length;      // installed only
+  const queued = sing.getOwnedAugmentations(true).length - installed; // purchased, awaiting install
   const cash = ns.getServerMoneyAvailable("home");
   const invites = sing.checkFactionInvitations().length;
-  ns.print(`— augs owned/queued: ${owned} | factions: ${joined.length} | invites pending: ${invites} | ` +
-           `cash: $${fmt(ns, cash)} (reserve $${fmt(ns, reserve)})`);
+  ns.print(`— augs owned/queued: ${installed}/${queued} | factions: ${joined.length} | invites pending: ${invites} | ` +
+           `cash: $${fmt(ns, cash)} (reserve $${fmt(ns, reserve)})${nfgHeld ? " | NFG held (real augs remain — banking; --install to release)" : ""}`);
 }
 
 /** Short currency formatting, robust to ns.formatNumber being absent (matches commander.js). */
