@@ -24,6 +24,12 @@ sleep. This repo is a complete, self-managing automation for that grind:
 You run `commander.js`. It does the rest. Everything else in the repo is a piece
 it uses.
 
+It has since grown three more rigs that run alongside it, each with its own docs: the
+[DarkNet](#the-darknet-advanced-frontier) crawlers, the
+[augmentation flywheel](#the-augmentation-flywheel) that turns money into permanent upgrades, and a
+[corporation](#the-corporation-bitnode-3) — which in BitNode 3 is not a side project but the entire
+income plan. `boot.js` starts the lot.
+
 ---
 
 ## ⚠️ Read this first: version compatibility
@@ -192,6 +198,81 @@ It's a different beast with its own docs — **start with the runbook**:
 
 Append `--suppress-info` to any crawl (or `dnet-commander.js loop auto`) to quiet the routine chatter
 and see only genuinely-new puzzle models.
+
+---
+
+## The augmentation flywheel
+
+Hacking money is a means to an end: **augmentations**. Buying them, installing them (which resets
+your level, your cloud servers and your programs) and coming back stronger is the actual loop of
+the game. These scripts automate all of it except the trigger itself.
+
+| File | What it is |
+|---|---|
+| **ascend.js** | Plans the augmentation purchase — joins factions, buys in the right order, dumps leftover cash into NeuroFlux. It **will not install** unless you pass `--install`; that trigger stays yours. |
+| **ascend-boot.js** | Rebuys the `.exe` programs an install wipes, so the commander can root things again on the other side. |
+| **boot.js** | Brings the *whole* earning stack back up in one command: commander, gang, stock trader, sleeves, corporation — each behind a prerequisite check, each skipped if already running. |
+| **share-manager.js** | Sprays `ns.share()` across idle fleet RAM to boost faction reputation gain, with a home reserve. |
+| **backdoor.js** | Walks the network installing backdoors on the servers that matter (faction unlocks, and the -50% company rep requirement). |
+
+```
+run ascend.js                          # plan and buy; never installs
+run ascend.js --install --cb boot.js   # ...and pull the trigger, then reboot everything
+```
+
+**Two things survive an augmentation install: your gang and your corporation.** So an install costs
+you nothing on those fronts, and there's no reason to hesitate over one.
+
+---
+
+## Passive income: gang and sleeves
+
+| File | What it is |
+|---|---|
+| **gang-manager.js** | Runs a gang end to end: recruits, ascends members past the diminishing-returns point, assigns tasks by what actually pays, and buys equipment. `gang-design.md` is the *why*. |
+| **sleeve-manager.js** | Puts duplicate sleeves to work — crime, faction work, or training — depending on what the run needs. |
+| **grafting-queue.js** | Queues augmentation grafting, which trades time for augs you can't otherwise reach. |
+| **gang-api.js** | Throwaway live-API probe, the same shape as `dnet-api.js`. |
+
+---
+
+## The corporation (BitNode 3)
+
+BN3 is a money-starvation node: hacking income lands at roughly **0.8% of normal** while
+augmentations cost 3× money *and* 3× reputation. No amount of tuning the hacking rig pays for that
+node. **The corporation is the income plan; everything else is support.** Run properly it goes from
+\$150b of seed money to revenue in the billions per second.
+
+It is a *lot* of small scripts, and that is not an accident. Every `ns.corporation.*` function costs
+10–20 GB of RAM just for being **mentioned** in a file, so a single manager touching most of the API
+lands around 700 GB. The rig is instead a nearly-free conductor (~3.6 GB, using only the five 0-GB
+calls) that launches one short-lived module at a time — peak usage is *conductor + largest module*.
+
+**Start with the runbook**, the same way the darknet has one:
+
+- **`bn3-runbook.md`** — the *how*: the three loops, the round-by-round plan, a command cheat sheet
+  and a troubleshooting table.
+- **`corp-design.md`** — the *why*: the RAM wall, the confirmed API surface, and the field findings
+  behind every decision.
+
+| File | What it is |
+|---|---|
+| **corp-conductor.js** | The resident brain. Keeps the supply and morale controllers alive, refreshes shared state, re-asserts Market-TA.II, and shouts about the two silent killers (no sell order = \$0/s; congestion = production halted). Spending is opt-in via `--auto-*` flags. |
+| **corp-report.js** | Everything about the corporation in one paste-back block. Reads, never spends. Backed by `corp-scan-corp.js`, `corp-scan-city.js`, `corp-scan-cost.js`. |
+| **corp-boot.js / corp-division.js / corp-cities.js / corp-warehouses.js** | Standing the corporation up: industry, six cities, warehouses. |
+| **corp-office.js / corp-hire.js / corp-jobs.js / corp-morale.js** | Staff: office size, hiring, the job mix, and holding morale at 100 (the 10/10 floor is **1%** production). |
+| **corp-sell.js / corp-buy.js / corp-supply.js / corp-smartsupply.js** | Sell orders (without one, revenue is exactly \$0), input purchasing, and the game's own Smart Supply. |
+| **corp-boost.js / corp-warehouse-upgrade.js** | Boost materials as a *share of the warehouse*, solved from each industry's factors — and the warehouse levels that make room. |
+| **corp-export.js** | Inter-division transfers. There is no import API; an import is the far end of an export. |
+| **corp-product.js** | Round 3+: always keep a product in development, and price what's finished. This is where the exponential curve lives. |
+| **corp-ta.js** | Switches Market-TA.II *on*. Researching it does nothing until the per-item flag is set — and every new product arrives with it off. |
+| **corp-upgrade.js / corp-advert.js / corp-research.js** | Spending the funds: corporation-wide upgrade levels, AdVert where the industry's factor justifies it, and research. |
+| **corp-bribe.js** | Corporation funds → faction reputation at \$1b/point, once valuation clears \$100t. This is how you buy through BN3's 3× reputation wall. |
+| **corp-dividend.js** | The dividend rate — the tap that finally moves money into your *wallet*. Corporation funds are not your money. |
+
+Every one of them reports before it acts, takes `--dry` and `--help`, and is safe to re-run. The
+genuinely one-way levers — accepting an investment offer, going public, discontinuing a product —
+are deliberately **not** scripted and stay manual buttons.
 
 ---
 

@@ -27,7 +27,18 @@ scripts, co-written by Sara and an assistant across sessions. Read this before w
   network): roots, buys/upgrades cloud servers, picks targets, hacks. Everything else
   in the repo is a piece it uses (batchers, contract-finder, purchase-servers, etc.).
 - `stock-trader.js`, `liquidate.js` — 4S stock bot + cash-out helper.
-- `README.md` — the human-facing guide; start there for how the light-net rig fits together.
+- `boot.js` — brings the **whole** earning stack back up in one command (commander, gang,
+  stock, sleeves, corporation), each behind a prerequisite guard. It is what `ascend.js`
+  relaunches after an install, so args that must survive a reset are baked into its `STACK`
+  rather than typed at the terminal.
+- `ascend.js` / `ascend-boot.js` — the augmentation flywheel: plan the purchase, hold the
+  install behind `--install`, restore `.exe` programs on the other side.
+- `gang-manager.js`, `sleeve-manager.js`, `grafting-queue.js` — the other passive income and
+  stat streams. Both a gang and a corporation **survive an augmentation install**.
+- `corp-*.js` — the corporation rig, and the point of BitNode 3. Many small scripts rather than
+  one manager, entirely because of the RAM wall (see `corp-design.md`). **Read `bn3-runbook.md`
+  (the *how*) and `corp-design.md` (the *why*) before touching any of it.**
+- `README.md` — the human-facing guide; start there for how the pieces fit together.
 
 ## Current frontier: the **DarkNet** (`ns.dnet`)
 
@@ -52,6 +63,25 @@ darknet code. API surface re-derived from the official 3.0 docs, now being confi
   reactive, promotes to batching once the usable pool clears `BATCH_MIN_POOL`, demotes back (raising
   the bar) if hack income stalls. `--reactive` still force-pins the old behavior.
 
+- **`typeof x === "function"` does NOT prove an API is usable.** Bitburner keeps *tombstones* for removed
+  functions (`setRemovedFunctions`): they survive on the namespace and pass a typeof probe, but throw
+  "removed in version X, use Y instead" when called. `ns.corporation` has 74 properties and only 63 real
+  ones — the other 11 are 2.2.0/3.0.0 removals, including `setAutoJobAssignment` (removed in **3.0.0**,
+  and exactly what an LLM trained on 2.x corp scripts reaches for). A live typeof probe proves *presence*;
+  only a call proves *callability*. This inverts the gang lesson, where an undocumented method
+  (`getOtherGangInformation`) was a real bonus — check which kind you've found before designing around it.
+  - **This already bit us, and is now fixed.** `ns.formatNumber` was removed in **3.0.0**
+    (→ `ns.format.number()`), as were `formatRam`, `formatPercent`, `tFormat`, `nFormat`, and
+    `getTimeSinceLastAug`. `commander.js`, `ascend.js` and `ascend-boot.js` each guarded with
+    `typeof ns.formatNumber === "function"` and then called it inside a `try` — the typeof passed
+    (tombstone), the call threw, and all three silently took the hand-rolled fallback on *every*
+    number they ever printed. They worked by accident for months. All three now call
+    `ns.format.number()` (0GB) first. **Use it in new code; never reach for `ns.formatNumber`.**
+- **Pin research to the `v3.0.1` release tag, not `dev`.** `github.com/bitburner-official/bitburner-src`
+  has tags; `raw.githubusercontent.com/.../v3.0.1/...` gets the released source and the released
+  `markdown/`. That's how to check a doc claim without guessing whether it runs ahead of the game —
+  though the running game still outranks both.
+
 ## Conventions
 
 - Scripts target `home` as the primary host and are meant to be copied there wholesale.
@@ -63,6 +93,18 @@ darknet code. API surface re-derived from the official 3.0 docs, now being confi
 - **RAM is charged for every `ns.*` a script's imports *mention*, even uncalled.** The darknet crawler
   sits on a knife-edge against 16GB nodes, so check `ns.getScriptRam` (or `mem` in-game) before adding an
   `ns` call to it or a module it imports — a stray `ns.rm`/`ns.heartbleed` can strand its reach.
+  - **Worse: the RAM walker resolves identifiers by BARE NAME against the whole cost tree, namespace
+    ignored** (`RamCalculations.ts:225-249`). A local helper or property named `probe` bills you
+    `ns.dnet.probe`; one named `research` bills **20GB** for `ns.corporation.research` — in a file that
+    never touches either namespace. Name locals defensively.
+  - **There is no bracket-access loophole.** `const c = ns.corporation; c[name](...)` hides the call from
+    the *static* walker, but the runtime enforces a SECOND budget: `updateDynamicRam`
+    (`NetscriptHelpers.tsx:434-458`) adds each function's cost the first time it's actually called and
+    kills the script with *"Dynamic RAM usage calculated to be greater than RAM allocation"* the moment
+    the running total exceeds what was statically allocated. So dynamic dispatch works **only for 0-cost
+    functions** (`hasCorporation`, `getConstants`, `nextUpdate`, `ns.enums`, …). A script must honestly
+    pay for every charged function it calls, however it calls it. Budget by splitting work across small
+    scripts, never by hiding the call.
 - **Model-hunting loop (darknet).** A `FAILED … (Model)` trace is the spec: read the `heartbleed data`,
   name the grammar, add a parser in `dnet-constraints.js` (static hints) or a strategy in `dnet-solve.js`
   (adaptive/feedback), test, commit. Run crawls with `--suppress-info` to surface only new models.
