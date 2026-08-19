@@ -90,10 +90,11 @@ function canonical(norm) {
   return map[norm] || norm + ".exe";
 }
 
-/** Short currency formatting, robust to ns.formatNumber being absent (matches commander.js). */
+/** Short currency formatting, with our own fallback (matches commander.js).
+ *  The old second branch called ns.formatNumber, removed in 3.0.0 — a tombstone that passes
+ *  `typeof === "function"` and throws when called, so it was dead code. Use ns.format.number. */
 function fmt(ns, n) {
   if (ns.format && typeof ns.format.number === "function") { try { return ns.format.number(n); } catch { /* fall through */ } }
-  if (typeof ns.formatNumber === "function") { try { return ns.formatNumber(n); } catch { /* fall through */ } }
   const a = Math.abs(n), s = ["", "k", "m", "b", "t", "q"];
   let i = 0; let v = a;
   while (v >= 1000 && i < s.length - 1) { v /= 1000; i++; }

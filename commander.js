@@ -488,10 +488,13 @@ function drainStats(ns, fleetStats) {
 let _startIncome = null, _startT = 0, _incomeWarned = false;
 const _fleetBase = new Map();   // target -> estEarned when first seen THIS run (for this-run per-fleet totals)
 
-/** Short currency-ish formatting, robust to ns.formatNumber being absent. */
+/** Short currency-ish formatting. Prefers the game's own formatter, falls back to ours.
+ *  NB: ns.formatNumber was REMOVED in 3.0.0 (→ ns.format.number). It lingers as a tombstone
+ *  that passes a `typeof === "function"` check and then THROWS when called, so the old guard
+ *  here silently threw once per formatted number and landed in the manual path every time. */
 function fmt(ns, n) {
   if (!Number.isFinite(n)) return "0";
-  if (typeof ns.formatNumber === "function") { try { return ns.formatNumber(n); } catch { /* fall through */ } }
+  if (ns.format && typeof ns.format.number === "function") { try { return ns.format.number(n); } catch { /* fall through */ } }
   const a = Math.abs(n);
   for (const [v, s] of [[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]]) if (a >= v) return (n / v).toFixed(2) + s;
   return n.toFixed(0);

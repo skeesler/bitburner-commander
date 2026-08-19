@@ -26,11 +26,12 @@
  *       decided to reset, so dumping leftover cash into NFG is what you want).
  *    5. ONLY IF you pass --install: when there's nothing left to buy this pass, it
  *       installs (which resets you to level 1 and wipes cloud servers + programs) and
- *       relaunches your commander via the callback. Without --install it just keeps
+ *       relaunches your earning stack via the callback. Without --install it just keeps
  *       banking augs and never pulls that trigger — you install when YOU'RE ready.
  *
  *  --reserve N  keep $N in the bank (default 0).   --dry  preview, spend nothing.
- *  --cb script  what to relaunch after an install (default commander.js).
+ *  --cb script  what to relaunch after an install (default boot.js — brings up the
+ *               whole earning stack; pass commander.js for just the hacking rig).
  *
  *  RAM NOTE: Singularity functions are RAM-expensive, and OUTSIDE BitNode 4 that cost
  *  is ×16 / ×4 / ×1 for Source-File 4 level 1 / 2 / 3. This script mentions ~16 of them,
@@ -56,7 +57,7 @@ export async function main(ns) {
     ["no-nfg", false],     // don't dump leftover cash into NeuroFlux
     ["reserve", 0],        // cash to keep in the bank
     ["dry", false],        // preview only — never spend
-    ["cb", "commander.js"], // callback script relaunched after an install
+    ["cb", "boot.js"],     // callback script relaunched after an install (relaunches the whole earning stack)
   ]);
   const reserve = Number(flags["reserve"]) || 0;
   const dry = flags["dry"];
@@ -241,10 +242,11 @@ function status(ns, sing, joined, reserve, nfgHeld) {
            `cash: $${fmt(ns, cash)} (reserve $${fmt(ns, reserve)})${nfgHeld ? " | NFG held (real augs remain — banking; --install to release)" : ""}`);
 }
 
-/** Short currency formatting, robust to ns.formatNumber being absent (matches commander.js). */
+/** Short currency formatting, with our own fallback (matches commander.js).
+ *  The old second branch called ns.formatNumber, removed in 3.0.0 — a tombstone that passes
+ *  `typeof === "function"` and throws when called, so it was dead code. Use ns.format.number. */
 function fmt(ns, n) {
   if (ns.format && typeof ns.format.number === "function") { try { return ns.format.number(n); } catch { /* fall through */ } }
-  if (typeof ns.formatNumber === "function") { try { return ns.formatNumber(n); } catch { /* fall through */ } }
   const a = Math.abs(n), s = ["", "k", "m", "b", "t", "q"];
   let i = 0; let v = a;
   while (v >= 1000 && i < s.length - 1) { v /= 1000; i++; }
