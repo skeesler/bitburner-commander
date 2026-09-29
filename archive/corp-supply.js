@@ -322,15 +322,19 @@ function fmt(ns, n) {
   try { return ns.format.number(n, 2); } catch (e) { return n.toFixed(2); }
 }
 
-/** Explicit flag > corp-state.txt > built-in guess. ns.read is 0GB, so this is free. */
+/** Explicit flag > corp-state.txt > built-in guess. ns.read is 0GB, so this is free.
+ *  Only a FRESH state file counts: home files survive an install and a BitNode jump, so a stale
+ *  roles.material is last life's corporation (BN3's ghosts arriving in BN5) — aiming a buy loop
+ *  at the wrong division is worse than aborting with a name that plainly doesn't exist. */
 function resolveDivision(ns, flagValue) {
   if (flagValue) return flagValue;
   try {
     const raw = ns.read(STATE_FILE);
     if (raw) {
       const st = JSON.parse(raw) || {};
-      if (st.roles && st.roles.material) return st.roles.material;
-      if (Array.isArray(st.divisions) && st.divisions.length === 1) return st.divisions[0];
+      const fresh = Number.isFinite(st.ts) && Date.now() - st.ts <= 600e3;
+      if (fresh && st.roles && st.roles.material) return st.roles.material;
+      if (fresh && Array.isArray(st.divisions) && st.divisions.length === 1) return st.divisions[0];
     }
   } catch (e) { /* fall through */ }
   return DIVISION;

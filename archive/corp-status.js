@@ -56,9 +56,13 @@ export async function main(ns) {
     const prev = ns.read(STATE_FILE);
     if (prev) roles = (JSON.parse(prev) || {}).roles || {};
   } catch (e) { /* unreadable or malformed — start fresh */ }
-
-  // With a single division there's no ambiguity: it's the material division we bootstrap on.
-  if (!roles.material && info.divisions.length === 1) roles.material = info.divisions[0];
+  // ...but only roles that still point at a REAL division. Home files survive a BitNode jump;
+  // the corporation does not. A corp-state.txt written last node can name divisions that no
+  // longer exist (BN3's "Tobacco" arriving in BN5), and preserving those forever would keep the
+  // conductor launching corp-product.js / corp-supply.js at ghosts, abort-spamming every cycle.
+  for (const key of Object.keys(roles)) {
+    if (!info.divisions.includes(roles[key])) delete roles[key];
+  }
 
   const lines = [];
   // Division name -> industry. Recorded because a division can be called anything, while the
@@ -72,6 +76,11 @@ export async function main(ns) {
       // Record the first product-capable division as the "product" role, so corp-product.js can
       // find it without paying 10GB for getCorporation. Never overwrite a hand-assigned one.
       if (!roles.product && d.makesProducts) roles.product = name;
+      // A lone division is the material division we bootstrap on — unless it's a product
+      // industry (a product-first corp, possible outside BN3), which corp-supply.js must not
+      // be pointed at: its Agriculture-shaped defaults would buy the wrong inputs and flag
+      // phantom no-sell warnings on materials the division never produces.
+      if (!roles.material && info.divisions.length === 1 && !d.makesProducts) roles.material = name;
       lines.push(`  ${name} — ${d.industry}, ${d.cities.length}/6 cities, ` +
         `RP ${fmt(ns, d.researchPoints)}, awareness ${fmt(ns, d.awareness)}, ` +
         `products ${d.products.length}/${d.maxProducts}` +

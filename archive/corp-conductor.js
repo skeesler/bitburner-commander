@@ -141,6 +141,13 @@ const REPORT_PREFIX = "corp-supply-";
 // and every warning in them becomes a ghost — the conductor would keep shouting CONGESTED about
 // a jam you fixed an hour ago. Anything older than this is treated as no data, not as data.
 const REPORT_MAX_AGE_MS = 120e3;
+// Same rule for corp-state.txt itself, on a longer clock (it refreshes every ~minute while the
+// conductor runs). Home files survive an install AND a BitNode jump; the corporation's divisions
+// may not. A state file from last node still lists BN3's Agriculture/Chemical/Tobacco, and
+// trusting it means launching supply and product controllers at divisions that no longer exist —
+// each aborts, is relaunched next cycle, and spams the terminal forever. Stale state is last
+// life's evidence: treat it as nothing, and the corp-status refresh a cycle later rebuilds it.
+const STATE_MAX_AGE_MS = 600e3;
 // ---------------------------------------------------------------------------
 
 export async function main(ns) {
@@ -339,7 +346,9 @@ export async function main(ns) {
     }
 
     // ---- 4. say something useful ------------------------------------------
-    const st = readJson(ns, STATE_FILE);
+    // freshState, not readJson: showing last week's funds as if they were live is worse than
+    // "waiting for corp-status.js", which statusLine already says for missing data.
+    const st = freshState(ns);
     if (cycle % Math.max(1, PRINT_EVERY) === 0) ns.print(statusLine(ns, st, reports, warns, opts));
 
     // A new warning is worth interrupting for; a repeat of the same one isn't.
@@ -481,15 +490,21 @@ function isRunning(ns, script, args) {
   return ns.ps("home").some((p) => p.filename === script && (p.args || []).join(" ") === want);
 }
 
+/** corp-state.txt, but only if fresh enough to trust (see STATE_MAX_AGE_MS). 0GB. */
+function freshState(ns) {
+  const st = readJson(ns, STATE_FILE);
+  return st && Number.isFinite(st.ts) && Date.now() - st.ts <= STATE_MAX_AGE_MS ? st : null;
+}
+
 /** Division names from corp-state.txt (0GB), so a division-specific module waits its turn. */
 function divisionsFromState(ns) {
-  const st = readJson(ns, STATE_FILE);
+  const st = freshState(ns);
   return st && Array.isArray(st.divisions) ? st.divisions : [];
 }
 
 /** The product division, if corp-status.js has seen one. 0GB — it's a file read. */
 function productDivision(ns) {
-  const st = readJson(ns, STATE_FILE);
+  const st = freshState(ns);
   return (st && st.roles && st.roles.product) || "";
 }
 

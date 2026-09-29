@@ -444,13 +444,17 @@ function isZero(v) {
 }
 
 /** Explicit flag > corp-state.txt's product role > a lone product-capable division. 0GB. */
+/** Only a FRESH corp-state.txt counts (same rule as corp-supply.js): home files survive an
+ *  install and a BitNode jump, so a stale roles.product is last life's corporation — BN3's
+ *  "Tobacco" arriving in BN5. Stale file → "" → the no-division help text, which is the truth. */
 function resolveDivision(ns, flagValue) {
   if (flagValue) return flagValue;
   try {
     const raw = ns.read(STATE_FILE);
     if (raw) {
       const st = JSON.parse(raw) || {};
-      if (st.roles && st.roles.product) return st.roles.product;
+      const fresh = Number.isFinite(st.ts) && Date.now() - st.ts <= 600e3;
+      if (fresh && st.roles && st.roles.product) return st.roles.product;
     }
   } catch (e) { /* fall through */ }
   return "";

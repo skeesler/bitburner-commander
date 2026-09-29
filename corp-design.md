@@ -10,6 +10,150 @@ Written after probing the **live** game with `corp-api.js` (throwaway; delete af
 Everything below is confirmed against the running game on **2026-08-09**, or read out of the
 **v3.0.1 release tag** — not the dev branch, which historically runs ahead.
 
+> **2026-09-27: the rig was rewritten into four files** — see [The 2026-09 rewrite](#the-2026-09-rewrite)
+> directly below. Everything after that section is the original BN3 design record: the game
+> mechanics, gotchas and decisions in it still hold, but its *architecture* (29 small scripts, a
+> free conductor, `corp-state.txt`) now lives in `archive/`. The how-to is `corp-runbook.md`.
+
+---
+
+## The 2026-09 rewrite
+
+**The RAM wall was real but it was also finite, and a big home clears it.** Read out of the v3.0.1
+tag, not estimated:
+
+- `RamCostGenerator.ts`: the corporation namespace is **20 read functions at 10 GB, 38 actions at
+  20 GB, 5 free** (`hasCorporation`, `canCreateCorporation`, `getConstants`, `getBonusTime`,
+  `nextUpdate`). Mentioning **every** corporation function in one file is **961.6 GB**.
+- `RamCalculations.ts:255` caps a script's static RAM at `RamCostConstants.Max` = **1024 GB**, and
+  `NetscriptHelpers.tsx:442` caps the dynamic (call-time) total at the same figure. So no corp
+  script can cost more than 1 TB, whatever it mentions. The "~700 GB monolith" in the RAM-wall
+  section below was an estimate; the true ceiling is lower than the cap.
+- `Corporation.ts:181`: `nextUpdate()` resolves with **the state that was just processed**. That
+  settles the "needs field confirmation" note in the control-loop spec below: a resident manager
+  can act at a known point in the cycle. `corp.js` acts once per cycle, right after SALE — job
+  changes land at the next START, buy rates are in place for PURCHASE, and last cycle's
+  production and sales figures are complete.
+
+So the split is now by **job**, not by RAM:
+
+| File | Role | RAM (counted from the cost table) |
+|---|---|---|
+| `corp-lib.js` | pure logic: boost Lagrange split, job mixes, supply controller, price hunt, export amount, parsers | 0 GB of its own; every importer pays for the few `ns.corporation` names it mentions |
+| `corp.js` | resident manager: staff, morale, sell orders, supply / Smart Supply, products, Market-TA.II flags; opt-in spending | ~495 GB (32 charged functions) |
+| `corp-do.js` | one-shot commands: build, size, and the one-way levers behind `--yes` | ~565 GB (36), for a second |
+| `corp-report.js` | the paste-back report, now reading everything itself | **192 GB measured** (19), for a few seconds |
+| `corp-lib.test.mjs` | Node spec for the lib — `node corp-lib.test.mjs` | — |
+
+What went away with the wall, and why each was only ever a RAM workaround:
+
+- **`corp-state.txt` and its freshness rules** (gotcha 10, the ghost divisions). `corp.js` reads
+  the live division list every cycle. The only file left is `corp-config.txt`: *intent* recorded
+  by `corp-do.js jobs`, which `corp.js` enforces.
+- **The conductor's scheduling**: launching modules, "one heavy module per cycle", retry counters,
+  `atExit` cleanup of children, supply report files with timeouts.
+- **Three report scanners** merging JSON fragments.
+- **Standing-rate staleness in the custom supply controller.** It still exists (Smart Supply costs
+  $25b), but it now runs inside the always-on manager at a known point in the cycle, so a rate a
+  jam drove to 0 is recomputed next cycle. Owning the unlock switches every warehouse over.
+
+Behaviour changes worth knowing, all deliberate:
+
+- **Sell orders go on exported materials too.** EXPORT runs before SALE, so `MAX` sells only what
+  the export left behind; without an order that leftover piles up until the warehouse jams.
+- **Boost is a controller, not a one-shot.** `--auto-boost` re-solves each city's target every
+  cycle against that city's current warehouse size, so Smart Storage can no longer dilute the
+  boost share (the ×881 plateau). It still only buys while the manager is alive and clears its
+  rates on exit. Boost materials the industry also consumes or makes are left to supply and sales.
+- **Staffing is automatic.** Seats are filled every cycle; the job mix per division is
+  `corp-config.txt`'s policy (`auto` = product mix for a product division, no-Business mix for an
+  export-only one, otherwise an even spread with 2/9 interns in any 9+ office).
+- **Two AdVerts per division, always, even in Agriculture** [SRC + LIVE 2026-09-27]. At awareness
+  0 the sales multiplier is `(0.01)^0.85 ≈ 0.02` (`Division.ts:1035`). The rewrite's first live
+  run showed it: Agriculture made 20–25/s per city and sold 4–6, and every warehouse filled with
+  unsold Food and Plants. The `advertisingFactor` filter only decides whether to buy *more*.
+  (Round 1 of the original plan said "plus 2 Advert"; the rewrite had dropped it.)
+- **Upgrades are cheapest-first by price × weight** (Smart Factories/Storage 0.4, DreamSense 3),
+  and Wilson is skipped until a division clears the AdVert factor filter. Plain cheapest-first
+  spent the first round-1 pass on \$1b employee-stat upgrades plus a \$4b Wilson that Agriculture
+  can't use.
+- **`--auto` buys warehouse levels** (with `--auto-boost`), ranked against Smart Storage by space
+  per dollar. The first live run never grew a warehouse past L1 (110 space), which capped boost
+  material, and so production, at 42 units of space per city.
+- **Imported inputs are bought lean** (one cycle + 5%, no buffer) [LIVE 2026-09-28]. The export
+  amount ships *less* the more the destination holds (`−IINV/10`). With the controller's usual
+  ~1.8-cycle stock that term exceeded the burn, the export dropped to a trickle, and the controller
+  filled the gap with quality-1 purchases, which kept the stock high. Agriculture imported 16
+  Chemicals/s and bought 47; Chemical sold 25/s of what it should have shipped. Buying lean leaves
+  almost nothing after PRODUCTION, so the export (evaluated at EXPORT, after production) ships the
+  full burn. Owning Smart Supply with `leftovers` behaves the same way.
+- **Product pricing: a backlog is not a price signal** [SRC + LIVE 2026-09-28]. Volume is
+  multiplied by exactly 1 anywhere from cost to `cost + markupLimit`
+  (`calculateMarkupMultiplier`), and a product's `markupLimit = effectiveRating / markup`
+  (`Division.ts:322`), roughly $60 on Tobacco's first $15k product. The original hunt cut on any
+  backlog and parked Prod-1 at cost, selling 5 of 16/s: sales *capacity* was the limit, so stock
+  piled up at every price. The hunt now cuts only when the last raise lost sales.
+- **Market-TA.I is for materials only; products wait for TA.II** [LIVE 2026-09-28]. TA.I prices at
+  exactly `cost + markupLimit` and stops there. Once Tobacco's products sold out every cycle
+  (demand above production), the right price was *above* the band, which the hunt finds and TA.I
+  can't. So `corp.js` switches TA.I **off** for products and on for materials until TA.II exists.
+- **Research points are output quality in a materials division** [SRC: `Division.ts:679`,
+  `tempQlt = Engineer/90 + researchPoints^researchFactor + ...`]. Letting TA.I "dip below the
+  keep" made Chemical, which sells nothing, spend 17.5k → 1.3k RP on it, and its Chemicals fell from
+  quality ~1,100 to 234. Now: Market-TA is never researched in an export-only division, materials
+  divisions keep 80% of their pool (product divisions 50%), and only Hi-Tech, Capacity.I and
+  (where something is sold) TA.I/II may dip below the keep.
+- **Four actions fail SILENTLY on short funds, and every call is now verified** [SRC + LIVE
+  2026-09-27]: `upgradeOfficeSize`, `purchaseWarehouse`, `upgradeWarehouse` and `hireAdVert` just
+  `return` without spending, with no error and no return value (`Actions.ts:398,426,446,454`).
+  The old rig knew about the warehouse pair. The rewrite's first live `office Agriculture 5` printed
+  six successes and grew nothing. `corp-do.js` and `corp.js` now re-read the office size, warehouse
+  level or AdVert count after each of these, and report `DID NOT HAPPEN` if it didn't change.
+  (`levelUpgrade`, `expandCity` and `research` throw instead, so a try/catch is enough for those.)
+- **Research holds off while a product is ≥90% developed**, since `sciMult` banks at completion.
+- **The one-way levers are now scripted, behind `--yes`**: `accept`, `public`, `sellshares`. They
+  still never run from the resident loop.
+- `corp-do.js sell ... --price 0` refuses boost materials outright (the \$100b story).
+
+### Money out, outside BN3 [SRC]
+
+`tributeModifier = 1.15 − CorporationSoftcap` (`Corporation.ts:54`), and a cycle's dividend to you
+is `payout ^ (1 − tributeModifier)` (`:195`). BN3's softcap is 1, so the exponent there is 0.85. In
+**BN10 the softcap is 0.9, so the exponent is 0.75**. Shady Accounting (−0.05) and Government
+Partnership (−0.1) are the only ways to move it (`:394-397`). At the scales the Covenant sleeves ask
+for (\$1q–\$100q) that exponent is ruinous: \$1q of payout per cycle arrives as roughly \$0.2t.
+
+`sellShares` has no exponent: it pays the share price in steps of 1m shares, the price sliding 0.5%
+per step (`calculateShareSale`, `:285-325`), on a 1-hour cooldown, and only once public. The share
+price tracks valuation (market cap is 0.5×–1.5× valuation depending on how much you own,
+`getTargetSharePrice`). So **outside BN3 the money tap is selling shares**, and `corp-do.js
+sellshares` is scripted for exactly that. Self-funding at creation (\$150b, trivial with a gang
+running) keeps 100% of the shares to sell; seed money is BN3-only anyway.
+
+### Extra divisions: mostly no, except as valuation filler [SRC]
+
+Agriculture → Chemical → Tobacco is the whole engine; the other eleven industries are variations,
+not upgrades. The one mechanical reason to open more is the valuation multiplier: private and
+public, valuation is multiplied by `1.0079741^(offices + warehouses)`, i.e. `1.1^(n/12)`
+(`Corporation.ts:208-217`, v3.0.1). A division in all six cities adds 12, so **×1.10 on the
+valuation** for its build cost, compounding per division. Worth it just before taking an offer or
+selling shares, once the valuation dwarfs the ~\$50–70b price. Valuation is averaged over recent
+cycles (`determineValuation`), so add them a little *before* the sale, not the same minute.
+BN10 also caps the division count (`CorporationDivisions` 0.9).
+Mark such a division with `corp-do.js filler DIV`: otherwise `corp.js` runs it as a real business
+(boost stock, warehouse levels, AdVerts, a product), and none of that moves the office/warehouse
+count. The first one, Restaurant, got all four before the mode existed.
+
+### What the rewrite gave up
+
+**Small homes.** Home RAM resets when a BitNode ends, and `corp.js` needs ~495 GB free. On a fresh
+node, either wait for the home upgrades or use the low-RAM rig in `archive/` — it is intact, with
+`archive/bn3-runbook.md` as its how-to. There is deliberately no second maintained rig.
+
+**Field confidence.** The archived modules had real play across BN3 and BN5. The new files were
+exercised against a mock corporation under Node (every `corp-do` command, every `corp.js` branch,
+the report) but not yet in the running game. First run: `run corp.js --once --dry`.
+
 ---
 
 ## Why this matters in BN3
@@ -228,6 +372,40 @@ already on a knife-edge against 16 GB nodes.
 9. **`getAscensionResult`-style undefined guards apply here too**: `Material.demand` / `.competition`
    and `Product.demand` / `.competition` are `undefined` unless the Market Research unlocks are owned.
    Our custom Market-TA2 needs both (5e9 each) — budget for them in round 3.
+10. **`corp-state.txt` outlives the corporation it describes** [found 2026-09-07, in BN5]. Home files
+   survive an augmentation install AND a BitNode jump; the corporation's divisions do not. The BN3
+   state file (divisions `Agriculture/Chemical/Tobacco`, `roles.product: Tobacco`) was still on home
+   in BN5, so the conductor would have launched `corp-product.js`/`corp-supply.js` at ghost divisions
+   — each aborts, relaunches next cycle, spams the terminal. And it was *permanent*: `corp-status.js`
+   preserved `roles` from the previous file without checking the named divisions still exist. Fixed
+   three ways: `corp-status.js` drops roles naming divisions absent from `getCorporation().divisions`;
+   the conductor treats a state file older than `STATE_MAX_AGE_MS` (10 min) as **no data** — the same
+   rule its supply reports already followed — and `corp-supply.js`/`corp-product.js` apply the same
+   freshness test before trusting `roles`. Also fixed while there: a *single*-division corp is no
+   longer auto-claimed as `roles.material` when that division makes products (a product-first corp,
+   possible outside BN3, must not inherit corp-supply's Agriculture-shaped defaults).
+11. **Trim gated on the wrong minimum** [found 2026-09-12, in BN5]. `corp-boost.js --trim` started
+   selling only when the least-over *material* in the least-over city cleared tolerance — so Real
+   Estate arriving within 2% of target silently vetoed the whole trim while Hardware and AI Cores
+   sat 25–30% of the warehouse over, production stalled at 100% full, revenue hit exactly \$0 (a
+   stock-out, not a missing sell order — the flag in `corp-report.js` now knows the difference),
+   and the script exited claiming "at target in every city". Fixed three ways: trim now gates
+   **per material** (each sells only while its least-stocked city is over target), the DONE
+   message admits when a material is still over, and the report's manual `corp-sell` suggestion
+   lists only the over-target materials instead of all of them.
+12. **A stale in-game copy can undo any of this** [the \$30b overbuy, 2026-09-12]. The runaway that
+   bought boost materials to 97.5% of every warehouse was an old `corp-boost.js` running from the
+   game's copy of the file — the current solver's targets always sum to `--total` (the mix is
+   normalised) and `--max-total` refuses plans over 60%, so the running code *provably* wasn't
+   this code. Same failure as the stale `dnet-step.js` in `SYNC-SETUP.md`: after any Remote API
+   disconnect, reconnect (which force-pushes everything) **before** launching a resident script,
+   and treat "a script did something its source can't do" as staleness until proven otherwise.
+13. **Outside BN3, round 1 does not fund round 2** [BN5, `CorporationValuation` 0.75]. The round-1
+   offer came to \$29.7b and the boost fill consumed all of it, where BN3's fatter offer paid for
+   Export and the Chemical division too. The valuation haircut compounds: smaller offers, same
+   price tags. Plan an earning plateau between the rounds — offices to 8 (the new hires default
+   to R&D, which restarts the RP/quality climb), let profit accumulate to the \$20b Export unlock
+   and then the Chemical division — or knowingly take the round-2 offer early at a discount.
 
 ---
 
@@ -256,9 +434,12 @@ already on a knife-edge against 16 GB nodes.
     `setSmartSupply` — `corp-smartsupply.js`. We paid \$25b and ran fully manual in all 12
     warehouses for an unknown number of hours. Check `warehouse.smartSupplyEnabled`, not
     `hasUnlock("Smart Supply")`.
-  - Set `setSmartSupplyOption` to **`imports`** on any division fed by exports, or Smart Supply
-    buys what a sister division is already sending — at quality 1, diluting the exact material the
-    support division exists to make properly.
+  - Set `setSmartSupplyOption` to **`leftovers`** — field-corrected. `imports` looked right for
+    an export-fed division, but it subtracts only the *flow* of arriving exports: when that flow
+    dips to zero, Smart Supply buys the full requirement at quality 1, the stock stays high, the
+    export formula goes negative, and the flow stays at zero. Seen live in Chemical/Ishima and
+    Volhaven (Chemicals quality 411 and 290 vs 777 in healthy cities). `leftovers` subtracts the
+    *stock*, so imported material already present suppresses the purchase.
 - **Market-TA2: CUSTOM SCRIPT** once we're in round 3+. The research costs 75k RP total
   (Hi-Tech R&D Lab → Market-TA.I → Market-TA.II) and the official docs call reimplementing it "the
   best optimization in round 3+". We still buy the two Market Research unlocks (\$5b each) because our

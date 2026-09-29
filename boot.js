@@ -24,15 +24,14 @@ const STACK = [
   { script: "gang-manager.js",    args: [],      when: inGang },
   { script: "stock-trader.js",    args: [],      when: has4S },
   { script: "sleeve-manager.js",  args: [],      when: hasSleeves },
-  // The --auto-* flags are baked in HERE, not typed at the terminal, for the reason at the top
-  // of this file: installAugmentations() relaunches boot with no args, so a conductor started by
-  // hand with spending on comes back after an install with spending off. That failure is silent —
-  // the corporation looks perfectly healthy and just quietly stops buying anything.
-  // Bribery is deliberately NOT here: it needs a faction name, reputation doesn't transfer between
-  // factions, and the right target moves as ascend.js changes what it's queuing. Run corp-bribe.js
-  // by hand when you want it.
-  { script: "corp-conductor.js",  args: ["--auto-upgrade", "--auto-advert", "--auto-research"],
-                                                 when: hasCorp },
+  // --auto is baked in HERE, not typed at the terminal, for the reason at the top of this file:
+  // installAugmentations() relaunches boot with no args, so a manager started by hand with
+  // spending on would come back after an install with spending off — silently, looking healthy.
+  // --auto = upgrades + AdVert + research + boost; boost is NOT optional next to upgrades, since
+  // every Smart Storage level grows the warehouse and dilutes the boost share (corp-design.md).
+  // Bribery stays off: it needs a faction name, and the right one moves with ascend.js's queue.
+  // corp.js is ~495GB — on a small home boot.js reports the shortfall and moves on.
+  { script: "corp.js",            args: ["--auto"], when: hasCorp },
 ];
 
 // ---- Hands-free flywheel --------------------------------------------------
@@ -91,8 +90,8 @@ function printHelp(ns) {
   ns.tprint(
     "\nboot.js — relaunch the earning stack after an install.\n" +
     "  run boot.js              start/refresh commander + gang + stock + sleeves + corp\n" +
-    "  The corp conductor comes up with --auto-upgrade --auto-advert --auto-research, so the\n" +
-    "  corporation keeps spending its funds after an install. Bribery stays manual.\n" +
+    "  The corp manager (corp.js) comes up with --auto, so the corporation keeps spending its\n" +
+    "  funds after an install. Bribery stays manual.\n" +
     "  run boot.js --flywheel   also relaunch ascend.js (this run only)\n" +
     "  run boot.js --dry        preview, launch nothing\n" +
     "  Set as ascend's callback:  run ascend.js --install --cb boot.js\n" +

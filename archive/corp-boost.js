@@ -33,8 +33,11 @@
  *  TRIMMING. --trim handles the over-target case by driving corp-sell.js (which is why this
  *  costs 1GB for ns.run instead of 20GB for sellMaterial), always at market price, never at
  *  price 0 — dumping boost material at 0 hands it away for nothing, and if you are over target
- *  you are usually also short of cash. It clears the sell order as soon as the LEAST-stocked
- *  city reaches target, so no city is ever trimmed below it.
+ *  you are usually also short of cash. Each material is trimmed INDEPENDENTLY, and each sell
+ *  order clears as soon as that material's LEAST-stocked city reaches target, so no city is
+ *  ever trimmed below it. (One shared gate across all materials was the original design, and
+ *  it deadlocked live in BN5: Real Estate arriving within tolerance of target vetoed the trim
+ *  while Hardware and AI Cores sat 25-30% of the warehouse over.)
  *
  *  RAM: buyMaterial (20) + getMaterial (10) + getWarehouse (10) + getMaterialData (10)
  *       + getCorporation (10) + ns.run (1.0) + 1.6 base = 62.6GB.
@@ -151,7 +154,8 @@ export async function main(ns) {
   ns.tprint(`corp-boost: driving ${division} to ${describe(targets)}${opts.trim ? " (trim on)" : ""}` +
     `${opts.dry ? " [DRY RUN]" : ""}. It exits by itself when done — tail corp-boost.js to watch.`);
 
-  let stalled = 0, trimming = false;
+  let stalled = 0;
+  const trimSet = new Set();   // materials with an active MAX@MP sell order right now
 
   // The same principle as the buy side: this script only ACTS while it is alive. A trim leaves a
   // standing MAX@MP sell order behind, and if you kill this mid-trim that order keeps going and
@@ -159,7 +163,7 @@ export async function main(ns) {
   // normal exit, stall exit, or a manual kill.
   if (!opts.dry) {
     ns.atExit(() => {
-      if (trimming) launch(ns, "corp-sell.js", ["--materials", names.join(","), "--clear", "--division", division]);
+      if (trimSet.size) launch(ns, "corp-sell.js", ["--materials", [...trimSet].join(","), "--clear", "--division", division]);
     });
   }
 
@@ -172,17 +176,28 @@ export async function main(ns) {
     }
 
     // ---- over target: hand the selling to corp-sell.js --------------------
-    // Gate on the LEAST-stocked city so trimming can never take a city below target.
-    if (opts.trim && plan.minSurplusFrac > TOLERANCE && !trimming) {
-      ns.print(`over target in ${plan.overCities.length} cities — starting trim at market price.`);
-      if (!opts.dry && launch(ns, "corp-sell.js",
-        ["--materials", names.join(","), "--amount", "MAX", "--price", "MP", "--division", division])) {
-        trimming = true;
+    // Gate PER MATERIAL on its least-stocked city, so trimming can never take a city below
+    // target. It used to gate all materials on one shared minimum, and a single near-target
+    // material vetoed the rest: Real Estate 3% over blocked the trim while Hardware and
+    // AI Cores sat 25-30% of the warehouse over and production stalled at 100% full.
+    if (opts.trim) {
+      const overMats = names.filter((m) => (plan.matSurplus[m] ?? -Infinity) > TOLERANCE);
+      const stopMats = [...trimSet].filter((m) => !overMats.includes(m));
+      const startMats = overMats.filter((m) => !trimSet.has(m));
+      if (stopMats.length) {
+        ns.print(`at target: ${stopMats.join(", ")} — clearing sell order(s).`);
+        if (!opts.dry && launch(ns, "corp-sell.js",
+          ["--materials", stopMats.join(","), "--clear", "--division", division])) {
+          for (const m of stopMats) trimSet.delete(m);
+        }
       }
-    } else if (trimming && plan.minSurplusFrac <= TOLERANCE) {
-      ns.print("trim target reached — clearing the sell order.");
-      if (!opts.dry) launch(ns, "corp-sell.js", ["--materials", names.join(","), "--clear", "--division", division]);
-      trimming = false;
+      if (startMats.length) {
+        ns.print(`over target: ${startMats.join(", ")} — trimming at market price.`);
+        if (!opts.dry && launch(ns, "corp-sell.js",
+          ["--materials", startMats.join(","), "--amount", "MAX", "--price", "MP", "--division", division])) {
+          for (const m of startMats) trimSet.add(m);
+        }
+      }
     }
 
     // ---- under target: buy, within what we can afford ---------------------
@@ -190,14 +205,21 @@ export async function main(ns) {
 
     if (plan.affordable === 0 && plan.toBuyCost > 0) stalled++; else stalled = 0;
 
-    ns.print(statusLine(ns, plan, trimming));
+    ns.print(statusLine(ns, plan, trimSet));
 
     // ---- are we done? -----------------------------------------------------
-    if (plan.maxDeficitFrac <= TOLERANCE && !trimming) {
+    if (plan.maxDeficitFrac <= TOLERANCE && trimSet.size === 0) {
       if (!opts.dry) clearRates(ns, division, cities, names);
-      ns.tprint(`\ncorp-boost: DONE. ${division} is at ${describe(targets)} in every city, ` +
-        `and every boost purchase order is back to zero.\n` +
-        `  Check:  run corp-boost.js\n`);
+      // "Done" must not claim "at target" when a material is still over it — which happens
+      // whenever --trim is off, and briefly if a corp-sell launch failed for RAM.
+      const still = names.filter((m) => (plan.matSurplus[m] ?? 0) > TOLERANCE);
+      ns.tprint(still.length
+        ? `\ncorp-boost: DONE buying — nothing is under target and every purchase order is back to ` +
+          `zero. But ${still.join(", ")} ${still.length === 1 ? "is" : "are"} still OVER target.\n` +
+          `  Sell the excess back at market price:  run corp-boost.js --loop --trim\n`
+        : `\ncorp-boost: DONE. ${division} is at ${describe(targets)} in every city, ` +
+          `and every boost purchase order is back to zero.\n` +
+          `  Check:  run corp-boost.js\n`);
       return;
     }
     if (stalled >= STALL_LIMIT) {
@@ -220,8 +242,8 @@ function survey(ns, division, cities, targets, unitSize, opts, cycleSeconds) {
     division, cities: [], missing: [], overCities: [],
     toBuyCost: 0, affordable: 0, funds: 0, spendable: 0,
     maxDeficitFrac: 0,
-    // Surplus of the least-over city: the safe gate for trimming.
-    minSurplusFrac: Infinity,
+    // Per material: the surplus of its least-stocked city — the safe gate for trimming it.
+    matSurplus: {},
   };
 
   try { plan.funds = ns.corporation.getCorporation().funds; } catch (e) { plan.funds = 0; }
@@ -262,16 +284,12 @@ function survey(ns, division, cities, targets, unitSize, opts, cycleSeconds) {
       if (gapFrac > plan.maxDeficitFrac) plan.maxDeficitFrac = gapFrac;
       const surplus = -gapFrac;                        // how far OVER target this material is
       if (surplus < citySurplusFrac) citySurplusFrac = surplus;
+      if (!(mat in plan.matSurplus) || surplus < plan.matSurplus[mat]) plan.matSurplus[mat] = surplus;
     }
 
-    if (citySurplusFrac !== Infinity) {
-      if (citySurplusFrac > TOLERANCE) plan.overCities.push(city);
-      if (citySurplusFrac < plan.minSurplusFrac) plan.minSurplusFrac = citySurplusFrac;
-    }
+    if (citySurplusFrac !== Infinity && citySurplusFrac > TOLERANCE) plan.overCities.push(city);
     plan.cities.push(row);
   }
-
-  if (plan.minSurplusFrac === Infinity) plan.minSurplusFrac = 0;
 
   // Scale the whole plan to what the corporation can actually pay for. An ambitious target
   // becomes slow progress instead of the debt spiral that motivated this script.
@@ -300,12 +318,13 @@ function clearRates(ns, division, cities, names) {
   }
 }
 
-function statusLine(ns, plan, trimming) {
+function statusLine(ns, plan, trimSet) {
   const worst = (100 * plan.maxDeficitFrac).toFixed(1);
   const over = plan.overCities.length;
   return `funds $${fmt(ns, plan.funds)} · worst shortfall ${worst}% of warehouse · ` +
     `spending $${fmt(ns, plan.affordable)}${plan.scale < 1 ? ` (capped from $${fmt(ns, plan.toBuyCost)})` : ""}` +
-    (over ? ` · ${over} cities OVER target` : "") + (trimming ? " · trimming" : "");
+    (over ? ` · ${over} cities OVER target` : "") +
+    (trimSet && trimSet.size ? ` · trimming ${[...trimSet].join(", ")}` : "");
 }
 
 function printPlan(ns, plan, opts, cycleSeconds) {
@@ -338,8 +357,8 @@ function printPlan(ns, plan, opts, cycleSeconds) {
       ? `  ${over} cit${over === 1 ? "y is" : "ies are"} OVER target — that space is why production stalls.\n` +
         `  Sell the excess back at MARKET PRICE (never --price 0; you'd hand it away for nothing):\n` +
         `      run corp-boost.js --loop --trim\n` +
-        `  ...which drives corp-sell.js for you and stops the moment you reach target. Or by hand:\n` +
-        `      run corp-sell.js --materials "${plan.cities[0].items.map((i) => i.mat).join(",")}" --amount "MAX" --price "MP"\n` +
+        `  ...which trims each material independently and stops it at target. Or by hand:\n` +
+        `      run corp-sell.js --materials "${Object.keys(plan.matSurplus).filter((m) => plan.matSurplus[m] > TOLERANCE).join(",")}" --amount "MAX" --price "MP"\n` +
         `      run corp-sell.js --materials "..." --clear      # when you get there\n`
       : plan.maxDeficitFrac > TOLERANCE
         ? `  Under target. To stock up safely:\n      run corp-boost.js --loop\n` +

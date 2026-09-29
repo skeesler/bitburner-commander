@@ -230,7 +230,7 @@ Two deliberate choices worth knowing:
 
 Stopping the conductor also stops the supply controller it started, so you can't leave a 51.6 GB
 script running invisibly. `boot.js` relaunches it after an install whenever a corporation exists —
-**with `--auto-upgrade --auto-advert --auto-research` baked into its `STACK` entry**, because
+**with `--auto-upgrade --auto-advert --auto-research --auto-boost` baked into its `STACK` entry**, because
 `installAugmentations()` relaunches boot with *no* args, so a conductor you started by hand with
 spending on would come back with spending off and look perfectly healthy while doing it.
 `reset-scripts.js` leaves it alone (it only kills the commander family).
@@ -262,8 +262,10 @@ run corp-boost.js --clear          # panic button: zero every boost buy rate now
 ```
 
 `--trim` drives `corp-sell.js` rather than mentioning `sellMaterial` itself (1 GB for `ns.run` beats
-20 GB), always at `MP`, and stops as soon as the *least*-stocked city reaches target so nothing is
-ever trimmed below it.
+20 GB), always at `MP`, and trims each material *independently* — each sell order clears as soon as
+that material's *least*-stocked city reaches target, so nothing is ever trimmed below it. (It used
+to gate every material on one shared minimum, and a single material arriving at target vetoed the
+trim for all the others — the BN5 deadlock in `corp-design.md` gotcha 11.)
 
 **Order matters:** upgrade warehouses *before* stocking boosts. A level-1 warehouse holds ~100 units
 of space, and you'd only be buying again after every upgrade.
@@ -677,6 +679,7 @@ run corp-warehouse-upgrade.js --add 5    # more space
 | Symptom | Cause | Fix |
 |---|---|---|
 | Revenue is **exactly** \$0.00/s | no sell order — the default is zero | `run corp-sell.js` |
+| Revenue \$0.00/s but the sell orders **exist** | stock-out: congestion halted production long enough for the stored output to sell out — an order on an empty shelf earns \$0 | free warehouse space (trim boosts / dump outputs); revenue returns on the first SALE after production restarts |
 | `prod 0.00` for several cycles, warehouse full | congestion — no room for output | dump with `--price 0` for one cycle, then restore; then raise warehouse levels |
 | Warehouse fills up again immediately | buy rate exceeds consumption | `run corp-buy.js --clear`, then set a lower mix |
 | Production is 0, warehouse **empty** | no inputs, or nobody assigned to Operations/Engineer | `run corp-buy.js`; `run corp-jobs.js --preset round1` |
