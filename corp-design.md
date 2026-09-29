@@ -101,8 +101,22 @@ Behaviour changes worth knowing, all deliberate:
   `tempQlt = Engineer/90 + researchPoints^researchFactor + ...`]. Letting TA.I "dip below the
   keep" made Chemical, which sells nothing, spend 17.5k → 1.3k RP on it, and its Chemicals fell from
   quality ~1,100 to 234. Now: Market-TA is never researched in an export-only division, materials
-  divisions keep 80% of their pool (product divisions 50%), and only Hi-Tech, Capacity.I and
-  (where something is sold) TA.I/II may dip below the keep.
+  divisions keep 80% of their pool, and only Hi-Tech, Capacity.I and (where something is sold)
+  TA.I/II may dip below the keep, and then only as far as 50%.
+- **...and in a product division it is the product's rating** [SRC + LIVE 2026-09-29]. Rating is
+  multiplied by `1 + researchPoints^researchFactor / 800`, banked when the product finishes.
+  Capacity.I took Tobacco from ~20k to ~1k RP, and the next product finished at 2,520 against
+  3,700 and 4,443 before it. With `--rotate` something is always in development, so the 90% hold
+  can't protect it. Product divisions now keep 80% too, with the same 50% floor for the must-haves.
+- **Boost orders are reconciled against the game, every cycle** [LIVE 2026-09-29]. A buy rate is a
+  standing per-second order *in the save*. `corp.js` only zeroed orders it remembered placing, and
+  a game close or reload restarts it with an empty memory without running `atExit`. Inherited
+  orders in Chemical/Sector-12, Aevum and Chongqing kept buying until Real Estate (41%) and Robots
+  (40%) filled the warehouses to 100%. Chemical stopped, Agriculture's quality there fell from ~200
+  to 14, and Tobacco's effective ratings from ~4,400 to ~1,000. Now any boost order the game holds
+  that isn't being placed this cycle is zeroed, even without `--auto-boost`. Stray sell orders on
+  boost materials are cleared, and a warehouse ≥90% full trims over-target boost stock at MP with
+  or without `--trim`. **Rule: never trust process memory for a standing order; read the game.**
 - **Four actions fail SILENTLY on short funds, and every call is now verified** [SRC + LIVE
   2026-09-27]: `upgradeOfficeSize`, `purchaseWarehouse`, `upgradeWarehouse` and `hireAdVert` just
   `return` without spending, with no error and no return value (`Actions.ts:398,426,446,454`).
@@ -143,6 +157,32 @@ BN10 also caps the division count (`CorporationDivisions` 0.9).
 Mark such a division with `corp-do.js filler DIV`: otherwise `corp.js` runs it as a real business
 (boost stock, warehouse levels, AdVerts, a product), and none of that moves the office/warehouse
 count. The first one, Restaurant, got all four before the mode existed.
+
+### Timing the exit [SRC + LIVE 2026-09-29]
+
+- Share sales run in 1m-share steps. After each step the price moves 0.5% toward the target price
+  for the ownership that's *left*: `valuation × (0.5 + √own) / totalShares` (`calculateShareSale`,
+  `getTargetSharePrice`, `Corporation.ts:251-325`). A big sale therefore walks the price down to
+  the new target and then hovers there. `corp-lib.js shareSale()` mirrors it step for step
+  (tested).
+- `goPublic` prices shares off the current, *private* valuation (`Actions.ts:144`). From then on the
+  corp is valued by the public formula, `funds + profit×85k` instead of `10b + funds/3 + profit×315k`
+  (`Corporation.ts:198-222`), about 27% as much at a live $7b/s. The price drifts toward that by up
+  to 1% a cycle, so **go public only when ready, and sell the big block the same minute**. Later
+  hourly sales are priced off the lower number.
+- **Freeze spending for 10+ cycles before the sale.** Valuation is the mean of the last
+  `valuationLength` = 10 cycles (`Constants.ts:73`). Offices, upgrades, AdVert and research are not
+  assets (`updateTotalAssets` counts funds, half of each division's build cost, and stock). A cycle
+  whose assets *fell* gets no profit term: its private valuation is just `10b + funds/3`
+  (`Corporation.ts:214-217`). `corp.js --auto` spends half the funds each pass, so each such cycle in
+  the window can take up to 10% off the price.
+- **Offices keep paying for a long time.** A seat costs `~1.3b × 1.09^(size/3)` (`calculateOfficeSizeUpgradeCost`):
+  $3b at 30, $23b at 100, $0.4t at 200, $7t at 300. It lowers the valuation by about cost/3, and each
+  $/s of profit it adds is worth about $250k of valuation. So a seat that pays for itself within
+  about 11 days raises the valuation. Tobacco (billions/s from ~180 staff) clears that easily up to
+  a few hundred per office. Agriculture, space-bound, doesn't.
+- `corp-do.js ipo` prints what that would pay today and the valuation a goal needs. At $1.558q and
+  55% ownership, half the shares raised $488t, so $100q needs a valuation of about $320q.
 
 ### What the rewrite gave up
 

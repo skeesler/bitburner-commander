@@ -349,6 +349,33 @@ export function nextProductName(existing, prefix = "Prod") {
   return `${prefix}-${top + 1}`;
 }
 
+// ---- share sales ------------------------------------------------------------
+
+/** What selling `numShares` pays, step for step as the game computes it [SRC v3.0.1:
+ *  Corporation.calculateShareSale, :285-325]. Shares go in blocks of 1m; after each block the price
+ *  moves 0.5% toward the target price for the ownership LEFT — and selling lowers ownership, so a
+ *  big sale walks the price down as it goes:
+ *      target = valuation * (0.5 + sqrt(ownedAfter / totalShares)) / totalShares   (:251-262)
+ *  Pure. Returns {proceeds, endPrice}. */
+export function shareSale({ numShares, sharePrice, ownedShares, totalShares, valuation, sharesUntilUpdate = 1e6 }) {
+  const step = 1e6;
+  let remaining = numShares, until = sharesUntilUpdate, price = sharePrice, sold = 0, proceeds = 0;
+  for (let i = 0, n = Math.ceil(numShares / step); i < n; i++) {
+    if (remaining < until) { proceeds += price * remaining; break; }
+    proceeds += price * step;
+    remaining -= step; sold += step;
+    const target = valuation * (0.5 + Math.sqrt(Math.max(0, (ownedShares - sold) / totalShares))) / totalShares;
+    price *= price <= target ? 1.005 : 0.995;
+    until = step;
+  }
+  return { proceeds, endPrice: price };
+}
+
+/** The share price right after going public with `issued` new shares [SRC: goPublic, Actions.ts:144]. */
+export function ipoPrice({ valuation, ownedShares, totalShares, issued = 0 }) {
+  return valuation * (0.5 + Math.sqrt(Math.max(0, (ownedShares - issued) / totalShares))) / totalShares;
+}
+
 // ---- exports ----------------------------------------------------------------
 
 // Ship what the importer burns, less a tenth of its stock — plus 5% of the exporter's output so

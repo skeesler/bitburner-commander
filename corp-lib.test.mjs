@@ -12,6 +12,7 @@
 import {
   boostTargets, mixForJobs, jobsMatch, autoJobPolicy, parseJobMix, validJobPolicy,
   supplyPlan, priceStep, PRICE, nextProductName, parseMoney, parseRoutes, isZero, boostFactors,
+  shareSale, ipoPrice,
 } from "./corp-lib.js";
 
 let pass = 0, fail = 0;
@@ -132,6 +133,26 @@ console.log("\npriceStep — the clearing-price hunt:");
   const opened = priceStep({ k: 3 }, { stored: 999, made: 10, sold: 0, unpriced: true });
   ok("an unpriced city opens at the believed price, no cut", near(opened.k, 3));
   ok("price string format", /^MP\*\d+\.\d{3}$/.test(opened.str));
+}
+
+console.log("\nshareSale — the game's step-by-step sale:");
+{
+  const base = { ownedShares: 550e6, totalShares: 1e9, valuation: 1.558e15 };
+  const p0 = ipoPrice(base);
+  ok("IPO price = valuation x (0.5 + sqrt(55%)) / shares", near(p0, 1.558e15 * (0.5 + Math.sqrt(0.55)) / 1e9, 1e-3));
+  const one = shareSale({ ...base, numShares: 1e6, sharePrice: p0 });
+  ok("a single 1m block sells at the starting price", near(one.proceeds, p0 * 1e6, 1));
+  const small = shareSale({ ...base, numShares: 10e6, sharePrice: p0 });
+  const big = shareSale({ ...base, numShares: 300e6, sharePrice: p0 });
+  ok("price walks DOWN as ownership falls", big.endPrice < p0 && small.endPrice < p0);
+  ok("big sales pay less per share than small ones", big.proceeds / 300e6 < small.proceeds / 10e6);
+  // The price falls 0.5% a block only until it meets the target for the ownership LEFT, then hovers.
+  const endTarget = 1.558e15 * (0.5 + Math.sqrt(0.25)) / 1e9;
+  ok("a big sale ends hovering at the target for the ownership left", Math.abs(big.endPrice / endTarget - 1) < 0.011,
+    `${big.endPrice} vs ${endTarget}`);
+  ok("...so it pays between the all-falling bound and the no-slide bound",
+    big.proceeds > p0 * 1e6 * (1 - Math.pow(0.995, 300)) / 0.005 && big.proceeds < p0 * 300e6);
+  ok("partial block is priced, not skipped", shareSale({ ...base, numShares: 500e3, sharePrice: p0 }).proceeds > 0);
 }
 
 console.log("\nsmall parsers:");

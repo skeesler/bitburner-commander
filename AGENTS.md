@@ -55,6 +55,12 @@ scripts, co-written by Sara and an assistant across sessions. Read this before w
   clean sweep so far: every [SRC] claim tested has matched live to float precision.
 - `README.md` — the human-facing guide; start there for how the pieces fit together.
 
+> **Update (2026-09-29): BN10 goal met — all five Covenant sleeves bought**, Memory 100 on each.
+> Sleeves 1–4 came from gang income. The $100q fifth came from the corporation: the four-file rig
+> grew a self-funded corp to a ~$200q private valuation in about two days of play. Then it went
+> public with 0 new shares and sold most of Sara's stake the same minute (`corp-do.js ipo`, and
+> `corp-design.md` → "Timing the exit"). Sara is leaving BN10 next; the next node is her call.
+>
 > **Current position (2026-09-21): BN6.1 complete** — Operation Daedalus succeeded; bb-conductor v2
 > ran the whole Bladeburner ladder (see `bn6-design.md`, the *why* for that node, and `bb-conductor.js`).
 > Holding SF1.3 / 2.3 / 3.3 / 4.3 / 5.3 / **6.1** / 9.1, plus **SF-1 level 3** (three exploits: every

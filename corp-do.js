@@ -22,6 +22,7 @@
 import {
   fmt, short, round, pct, listOf, sameName, parseMoney, readConfig, writeConfig, validJobPolicy,
   mixForJobs, autoJobPolicy, assignJobs, fillOffice, parseRoutes, EXPORT_AMOUNT, JOB_PRESETS,
+  shareSale, ipoPrice,
 } from "corp-lib.js";
 
 const CORP_NAME = "Astarte Industries";
@@ -52,6 +53,7 @@ const COMMANDS = {
   research:   [cmdResearch,   "research DIV [NAME]                    list a division's research, or buy one"],
   offer:      [cmdOffer,      "offer                                  the current investment offer"],
   accept:     [cmdAccept,     "accept --yes                           ACCEPT it (one-way; four in a corp's life)"],
+  ipo:        [cmdIpo,        "ipo [--goal 100q]                      what going public + selling shares would pay today (changes nothing)"],
   public:     [cmdPublic,     "public SHARES --yes                    GO PUBLIC (one-way: no more offers, ever)"],
   sellshares: [cmdSellShares, "sellshares N|10% [--yes]               sell your shares for cash (1h cooldown)"],
   dividend:   [cmdDividend,   "dividend RATE                          0..1 of profit paid out (public corps only)"],
@@ -65,7 +67,7 @@ export async function main(ns) {
   const opts = ns.flags([
     ["dry", false], ["yes", false], ["help", false],
     ["name", ""], ["seed", false], ["add", 0], ["price", "MP"], ["amount", "MAX"], ["clear", false],
-    ["show", false], ["agri", "Agriculture"], ["chem", "Chemical"], ["off", false],
+    ["show", false], ["agri", "Agriculture"], ["chem", "Chemical"], ["off", false], ["goal", "100q"],
   ]);
   const [cmd, ...args] = opts._.map(String);
   if (!cmd || opts.help || !COMMANDS[cmd]) {
@@ -427,6 +429,50 @@ function cmdPublic(ctx) {
   doIt(ctx, `WENT PUBLIC, issued ${fmt(ns, shares)} shares`, () => ns.corporation.goPublic(shares));
 }
 
+/** Plan the exit: what going public and selling at once would pay, at today's valuation.
+ *
+ *  Two facts from the source shape this [v3.0.1]:
+ *   - goPublic sets the share price to the target for the CURRENT valuation (Actions.ts:144), so
+ *     a sale in the same minute is priced off the private valuation;
+ *   - but a public corp is then valued by a harsher formula — funds + profit x 85k, against
+ *     10b + funds/3 + profit x 315k while private (Corporation.ts:198-222) — and the price drifts
+ *     toward the new, lower target by up to 1% a cycle. So the first sale is the big one, and the
+ *     hourly ones after it are priced off a smaller number. */
+function cmdIpo(ctx) {
+  const { ns, opts, say } = ctx;
+  const c = ns.corporation.getCorporation();
+  const goal = parseMoney(String(opts.goal));
+  const base = { ownedShares: c.numShares, totalShares: c.totalShares, valuation: c.valuation };
+  const p0 = c.public ? c.sharePrice : ipoPrice(base);
+  say.push(`valuation $${fmt(ns, c.valuation)} (${c.public ? "public" : "private"}) · you own ${fmt(ns, c.numShares)} of ` +
+    `${fmt(ns, c.totalShares)} (${pct(c.numShares / c.totalShares)}) · ${c.public ? "share price" : "price at IPO (0 new shares)"} $${fmt(ns, p0)}`);
+  let half = 0;
+  for (const f of [0.1, 0.25, 0.5, 0.75]) {
+    const n = Math.floor(c.numShares * f / 1e6) * 1e6;
+    const r = shareSale({ ...base, numShares: n, sharePrice: p0 });
+    if (f === 0.5) half = r.proceeds;
+    say.push(`  sell ${pct(f).padStart(6)} of your shares (${fmt(ns, n)}) -> $${fmt(ns, r.proceeds)}` +
+      `   (price ends $${fmt(ns, r.endPrice)}, you keep ${pct((c.numShares - n) / c.totalShares)} of the company)`);
+  }
+  // Every price is proportional to valuation, so proceeds scale linearly with it.
+  if (goal > 0 && half > 0) {
+    say.push(`to raise $${fmt(ns, goal)} by selling HALF your shares at once, the valuation needs to be ` +
+      `~$${fmt(ns, c.valuation * goal / half)} (${fmt(ns, goal / half)}x today).`);
+  }
+  if (!c.public) {
+    const P = Math.max(0, c.revenue - c.expenses), F = c.funds;
+    const ratio = (F + P * 85e3) / (10e9 + F / 3 + P * 315e3);
+    say.push(`after going public the valuation re-bases toward ~${pct(ratio)} of today's (profit x 85k instead of x 315k),`);
+    say.push(`and the price follows by up to 1% a cycle — so the sale made the same minute you go public is the big one.`);
+    // The valuation is the mean of the last 10 cycles (valuationLength), and a cycle whose assets
+    // FELL — offices, upgrades, AdVert and research are not assets — records no profit term at all:
+    // just 10b + funds/3 [Corporation.ts:214-217]. corp.js --auto spends half the funds a pass.
+    say.push(`BEFORE SELLING: freeze spending for 10+ cycles, or a big purchase in the last 10 drags the averaged`);
+    say.push(`valuation (and the sale price) down:  kill corp.js ; run corp.js --reserve ${fmt(ns, Math.ceil(c.funds * 2 / 1e12) * 1e12)}`);
+    say.push(`nothing changed. When ready: run corp-do.js public 0 --yes, then run corp-do.js sellshares 50% --yes at once.`);
+  }
+}
+
 /** The BN10 money tap. Dividends are paid as payout^(1 - tribute), and tribute is
  *  1.15 - CorporationSoftcap [SRC: Corporation.ts:54,195] — BN10's 0.9 softcap makes that ^0.75.
  *  A share sale is paid at share price, which tracks valuation, and has no such exponent. */
@@ -438,8 +484,10 @@ function cmdSellShares(ctx) {
   const n = raw.endsWith("%") ? Math.floor(c.numShares * Number(raw.slice(0, -1)) / 100) : Math.floor(parseMoney(raw));
   if (!(n > 0) || n >= c.numShares) throw new Error(`usage: sellshares N|PCT%  (you hold ${fmt(ns, c.numShares)}; can't sell all)`);
   const cd = c.shareSaleCooldown;
+  const est = shareSale({ numShares: n, sharePrice: c.sharePrice, ownedShares: c.numShares,
+    totalShares: c.totalShares, valuation: c.valuation });
   say.push(`you hold ${fmt(ns, c.numShares)} of ${fmt(ns, c.totalShares)} · share price $${fmt(ns, c.sharePrice)} · ` +
-    `${fmt(ns, n)} shares ≈ $${fmt(ns, n * c.sharePrice)} before the price slides (0.5% per 1m sold)` +
+    `${fmt(ns, n)} shares -> ~$${fmt(ns, est.proceeds)} (the price walks down 0.5% per 1m sold, to ~$${fmt(ns, est.endPrice)})` +
     (cd ? ` · COOLDOWN ${Math.ceil(cd / 5)}s left` : ""));
   if (!opts.yes) { say.push("add --yes to sell. Selling lowers your ownership, and with it share price and future dividends."); return; }
   doIt(ctx, `sold ${fmt(ns, n)} shares`, () => {

@@ -79,16 +79,21 @@ const ADVERT_FRAC = 0.2, ADVERT_MIN_FACTOR = 0.1;
 // sells. Found live 2026-09-27: Agriculture producing 20+/s per city and selling 5, warehouses
 // filling with unsold Food and Plants. The factor filter below is for BUYING MORE, not this floor.
 const ADVERT_FLOOR = 2;
-const RESEARCH_KEEP = 0.5;           // never spend a product division's RP pool below this share...
-// ...and a MATERIALS division keeps far more, because its RP pool IS its output quality:
-// tempQlt = Engineer/90 + researchPoints^researchFactor + ... [SRC v3.0.1: Division.ts:679].
-// Live 2026-09-28: Chemical spent 17.5k -> 1.3k RP and its Chemicals fell from quality ~1100 to 234.
-const RESEARCH_KEEP_MATERIAL = 0.8;
+// The RP POOL IS QUALITY, in every kind of division, so research spends it sparingly:
+//   materials: tempQlt = Engineer/90 + researchPoints^researchFactor + ... [SRC: Division.ts:679]
+//              (live 2026-09-28: Chemical spent 17.5k -> 1.3k RP, Chemicals quality ~1100 -> 234)
+//   products:  rating x (1 + researchPoints^researchFactor / 800), banked AT COMPLETION
+//              (live 2026-09-29: Capacity.I took Tobacco 20k -> ~1k RP and the next product
+//              finished at rating 2520 against its predecessors' 3700 and 4443)
+// With --rotate a product is ALWAYS in development, so a big spend always lands on one.
+const RESEARCH_KEEP = 0.8;           // ordinary research never takes the pool below 80%
+const RESEARCH_KEEP_MUST = 0.5;      // the RESEARCH_MUST list may dip to 50%, never further
 const RESEARCH_HOLD_AT = 90;         // ...and not at all while a product is past this % developed
 const RESEARCH_PRIORITY = ["Hi-Tech R&D Laboratory", "Market-TA.I", "Market-TA.II",
   "uPgrade: Capacity.I", "uPgrade: Capacity.II", "AutoBrew", "AutoPartyManager"];
-// These may spend the pool below the keep share (still never inside the product-completion hold):
-// pricing and product slots are worth more than the quality the RP would otherwise add. The two
+// These may spend the pool down to RESEARCH_KEEP_MUST (still never inside the product-completion
+// hold): pricing and product slots are worth more than the quality the RP would otherwise add —
+// but not worth zeroing it. TA.II at 50k therefore waits for a ~100k pool. The two
 // Market-TA researches only count — and are only bought at all — in a division that SELLS on the
 // market: an export-only support division has nothing for them to price (that is exactly how
 // Chemical burned 20k RP on TA.I).
@@ -557,8 +562,28 @@ function supply(ctx, div) {
  *  buys while this script is alive (rates are per-second and would otherwise run forever),
  *  and only within the funds this cycle has left. */
 function boost(ctx, div) {
-  if (!ctx.opts["auto-boost"]) return;
   const { ns, mem, opts } = ctx;
+  // RECONCILE AGAINST THE GAME, NOT OUR MEMORY. A buy rate is a standing per-second order stored in
+  // the SAVE; mem.boostRates is only this process's memory of it. atExit cleans up on a kill, but a
+  // game close/reload restarts corp.js with an empty memory while the old orders keep buying — which
+  // is exactly how Chemical/Sector-12, Aevum and Chongqing filled to 100% with Real Estate and Robots
+  // (live 2026-09-29), halted, and dragged Agriculture's and Tobacco's quality down with them. So
+  // every boost order the game holds that we are not deliberately placing THIS cycle is zeroed, and
+  // any sell order on a boost material that isn't a live trim is cleared. Even without --auto-boost.
+  if (!opts["auto-boost"]) {
+    for (const city of div.cities) {
+      if (!div.wh[city]) continue;
+      for (const mat of BOOST_MATERIALS) {
+        if (mat in div.required || div.produced.includes(mat)) continue;
+        const m = safe(() => ns.corporation.getMaterial(div.name, city, mat), null);
+        if (m && (m.buyAmount || 0) > 0) {
+          act(ctx, "boost", `STALE boost order ${div.name}/${city} ${mat} ${round(m.buyAmount)}/s -> 0`,
+            () => ns.corporation.buyMaterial(div.name, city, mat, 0));
+        }
+      }
+    }
+    return;
+  }
   const total = Number(opts["boost-total"]);
   // A boost material the industry also consumes or makes (Real Estate industry, Robotics...)
   // belongs to supply and sales, not here — two controllers on one rate would fight.
@@ -566,7 +591,7 @@ function boost(ctx, div) {
   for (const mat of BOOST_MATERIALS) {
     if (mat in div.required || div.produced.includes(mat)) delete factors[mat];
   }
-  const buys = [], trims = new Set();
+  const buys = [], trims = new Set(), stale = [];
   let cost = 0;
   for (const city of div.cities) {
     const wh = div.wh[city];
@@ -579,12 +604,22 @@ function boost(ctx, div) {
       const unit = mem.unitSize[mat];
       const gap = (targets[mat] || 0) - (m.stored * unit) / wh.size;
       const key = `${div.name}|${city}|${mat}`;
+      // A nearly-full warehouse halts production, so over-target boost stock there is trimmed
+      // whether or not --trim is on (at market price — never a price-0 dump).
+      const jammed = wh.sizeUsed / wh.size >= 0.9;
       if (gap > BOOST_BUY_TOL) {
         const units = Math.min(gap * wh.size, free) / unit;
         free -= units * unit;
-        buys.push({ city, mat, key, units });
+        buys.push({ city, mat, key, units, had: m.buyAmount || 0 });
         cost += units * (m.marketPrice || 0);
-      } else if (opts.trim && gap < -BOOST_TOL) {
+      } else if ((m.buyAmount || 0) > 0) {
+        stale.push({ city, mat, key, rate: m.buyAmount });   // an order we are NOT placing now
+      }
+      if (!(gap < -BOOST_TOL && (opts.trim || jammed)) && !isZero(m.desiredSellAmount) && !mem.trimming.has(key)) {
+        act(ctx, "trim", `STALE sell order ${key} cleared`,
+          () => ns.corporation.sellMaterial(div.name, city, mat, "0", "MP"));
+      }
+      if (gap < -BOOST_TOL && (opts.trim || jammed)) {
         const excess = (-gap * wh.size) / unit;
         trims.add(key);
         act(ctx, "trim", `trim ${key} ${round(excess, 0)} units @MP`,
@@ -610,10 +645,24 @@ function boost(ctx, div) {
       (heldBack ? ` — held back by --reserve $${fmt(ns, Number(opts.reserve))}; resumes when funds pass ` +
         `$${fmt(ns, Number(opts.reserve) + cost)}` : ""));
   }
+  for (const s of stale) {
+    // Ours from last cycle, now at target: close it quietly. Anything else is inherited: say so.
+    const ours = mem.boostRates.has(s.key);
+    act(ctx, "boost", ours ? `boost ${s.key} at target` : `STALE boost order ${s.key} ${round(s.rate)}/s -> 0`,
+      () => ns.corporation.buyMaterial(div.name, s.city, s.mat, 0), !ours);
+    mem.boostRates.delete(s.key);
+  }
   const wanted = new Set();
   for (const b of buys) {
     const rate = Math.round((b.units * scale / (mem.cycleSeconds * BOOST_SPREAD)) * 1e4) / 1e4;
-    if (!(rate > 0)) continue;   // also catches NaN — never hand buyMaterial a non-number
+    if (!(rate > 0)) {           // also catches NaN — never hand buyMaterial a non-number...
+      // ...and a shortfall we can't afford (or have no room for) this cycle must not leave an
+      // inherited order running either.
+      if (b.had > 0) act(ctx, "boost", `boost ${b.key} paused (no funds/room) -> 0`,
+        () => ns.corporation.buyMaterial(div.name, b.city, b.mat, 0), false);
+      mem.boostRates.delete(b.key);
+      continue;
+    }
     wanted.add(b.key);
     act(ctx, "boost", `boost ${b.key} ${rate}/s`, () => ns.corporation.buyMaterial(div.name, b.city, b.mat, rate), false);
     mem.boostRates.add(b.key);
@@ -648,7 +697,7 @@ function spendResearch(ctx) {
     // sciMult is BANKED into a product at completion — draining RP just before is permanent.
     if (div.products.some((p) => !p.finished && p.progress >= RESEARCH_HOLD_AT)) continue;
     let pool = Number(div.d.researchPoints) || 0;
-    const floor = pool * (div.d.makesProducts ? RESEARCH_KEEP : RESEARCH_KEEP_MATERIAL);
+    const floor = pool * RESEARCH_KEEP, mustFloor = pool * RESEARCH_KEEP_MUST;
     const avail = [];
     for (const r of names) {
       if (safe(() => ns.corporation.hasResearched(div.name, r), true)) continue;
@@ -662,7 +711,7 @@ function spendResearch(ctx) {
       const isTa = MARKET_TA.some((m) => sameName(m, r));
       if (isTa && !div.sellsToMarket) continue;       // nothing here for it to price
       const must = RESEARCH_MUST.some((m) => sameName(m, r));
-      if (done.has(r) || c > pool || (!must && pool - c < floor)) continue;
+      if (done.has(r) || pool - c < (must ? mustFloor : floor)) continue;
       done.add(r);
       ctx.counts.research = (ctx.counts.research || 0) + 1;
       if (ctx.opts.dry) { ctx.notes.push(`[dry] research ${div.name}: ${r} (${fmt(ns, c)} RP)`); pool -= c; continue; }

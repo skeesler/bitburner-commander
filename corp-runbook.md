@@ -145,8 +145,14 @@ are only three taps to your wallet:
 | dividend | go public first | weak in BN10: you receive `payout^0.75` (in BN3 it was `^0.85`) |
 | bribe | valuation past \$100t | faction reputation, not money |
 
-So for the \$1q / \$10q / \$100q Covenant sleeves, the path is: grow the valuation → take the
-offers you want → go public → sell shares every hour.
+So for the \$1q / \$10q / \$100q Covenant sleeves, the path is: grow the valuation while you're
+**private** → go public → **sell the big block the same minute**. Going public switches the corp to
+a harsher valuation formula (about a quarter of the private one), and the share price drifts down
+toward it, so the first sale pays the most. See how close you are, at any time, with:
+
+```
+run corp-do.js ipo                       # what going public + selling 10/25/50/75% would pay today
+```
 
 ```
 run corp-do.js public 0 --yes            # ONE-WAY: no more investment offers, ever. 0 = no dilution
