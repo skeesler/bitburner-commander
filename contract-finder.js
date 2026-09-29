@@ -17,7 +17,11 @@
  *  Unique Paths in a Grid (I & II), Shortest Path in a Grid,
  *  Sanitize Parentheses in Expression, Proper 2-Coloring of a Graph,
  *  Compression I: RLE Compression, Encryption I: Caesar Cipher,
- *  Encryption II: Vigenère Cipher.
+ *  Encryption II: Vigenère Cipher, Compression II: LZ Decompression,
+ *  HammingCodes: Encoded Binary to Integer, Square Root,
+ *  Find All Valid Math Expressions, Compression III: LZ Compression,
+ *  HammingCodes: Integer to Encoded Binary, Largest Rectangle in a Matrix,
+ *  Total Number of Primes.
  *
  *  NOTE: contract type strings are matched exactly against what
  *  ns.codingcontract.getContractType() returns. If the game has renamed
@@ -262,6 +266,298 @@ function vigenereCipher(text, keyword) {
   return result;
 }
 
+/** Compression II — decode the LZ variant Bitburner uses.
+ *
+ *  Chunks ALTERNATE, starting with a literal chunk, and each begins with a single length digit L:
+ *    - literal chunk: the next L characters are copied straight out;
+ *    - backreference chunk: one more digit X follows, then L characters are emitted, each a copy of
+ *      the character X places before the CURRENT end of the output.
+ *  L = 0 means the chunk is empty and we move straight to the next one — and crucially, a zero-length
+ *  backreference chunk consumes NO offset digit. Getting that wrong desynchronises the whole stream.
+ *
+ *  The backreference reads from `plain` as it grows, so an offset shorter than the run length copies
+ *  the same few characters repeatedly (that's how the format encodes long runs) — which is why this
+ *  appends one character at a time instead of slicing a fixed window. */
+function lzDecompress(compressed) {
+  let plain = "";
+  let i = 0;
+  let literal = true;
+  while (i < compressed.length) {
+    const len = Number(compressed[i]);
+    i++;
+    if (Number.isNaN(len)) break;                 // malformed input: stop rather than emit garbage
+    if (len > 0) {
+      if (literal) {
+        plain += compressed.substr(i, len);
+        i += len;
+      } else {
+        const offset = Number(compressed[i]);
+        i++;
+        for (let n = 0; n < len; n++) plain += plain[plain.length - offset];
+      }
+    }
+    literal = !literal;
+  }
+  return plain;
+}
+
+/** HammingCodes: Encoded Binary to Integer — correct the single flipped bit, then read the data out.
+ *
+ *  Extended Hamming layout: index 0 is the overall parity bit, every power-of-two index (1, 2, 4, 8…)
+ *  is a section parity bit, and everything else is data, most significant first.
+ *
+ *  The neat part: XOR together the INDICES of all set bits and the result is exactly the index of the
+ *  flipped bit (0 if the code is clean). No need to test each parity section separately — each
+ *  section's parity contributes its own bit to that XOR. Index 0 is skipped because XORing 0 is a
+ *  no-op anyway.
+ *
+ *  Returns a NUMBER — that's what the contract validates. */
+function hammingDecode(encoded) {
+  const bits = encoded.trim().split("").map(Number);
+  let err = 0;
+  for (let i = 1; i < bits.length; i++) if (bits[i] === 1) err ^= i;
+  if (err !== 0 && err < bits.length) bits[err] ^= 1;           // flip the one corrupted bit back
+  let binary = "";
+  for (let i = 3; i < bits.length; i++) {
+    if ((i & (i - 1)) === 0) continue;                          // power of two -> parity, not data
+    binary += bits[i];
+  }
+  if (!binary) return 0;
+  return Number(BigInt("0b" + binary));
+}
+
+/** Square Root — nearest integer square root of a ~200-digit BigInt.
+ *
+ *  Must be done in BigInt throughout: the input overflows a double long before you could Math.sqrt it,
+ *  and the contract wants a BIGINT back (not a string, not a number).
+ *
+ *  Newton's method converges to FLOOR(sqrt(n)), so the last step picks whichever of x and x+1 is
+ *  actually closer — "to the nearest integer" is the contract's wording, and a floor answer is wrong
+ *  slightly more than half the time. */
+function squareRootNearest(value) {
+  const n = typeof value === "bigint" ? value : BigInt(String(value).trim());
+  if (n < 2n) return n;
+  // Seed at 2^ceil(bits/2) — a good enough starting point that Newton converges in a few steps.
+  let x = 1n << BigInt(Math.ceil(n.toString(2).length / 2));
+  let y = (x + n / x) >> 1n;
+  while (y < x) { x = y; y = (x + n / x) >> 1n; }
+  return n - x * x <= (x + 1n) * (x + 1n) - n ? x : x + 1n;
+}
+
+/** Find All Valid Math Expressions — insert +, - and * between digits to hit the target.
+ *
+ *  Backtracking over every split point. The subtlety is operator PRECEDENCE: multiplication binds
+ *  tighter than the running total, so we carry `prev` (the value of the last term applied) and undo
+ *  it before re-applying it multiplied — `value - prev + prev * num`. Tracking only the running total
+ *  would evaluate strictly left to right and quietly produce wrong answers.
+ *
+ *  Leading zeros are illegal unless the operand IS "0", and the `break` matters: once a slice starting
+ *  at this position has a leading zero, every LONGER slice from here does too. */
+function findMathExpressions(data) {
+  const digits = String(data[0]);
+  const target = Number(data[1]);
+  const out = [];
+  const walk = (pos, expr, value, prev) => {
+    if (pos === digits.length) {
+      if (value === target) out.push(expr);
+      return;
+    }
+    for (let len = 1; pos + len <= digits.length; len++) {
+      const part = digits.slice(pos, pos + len);
+      if (part.length > 1 && part[0] === "0") break;            // no leading zeros, and none longer either
+      const num = Number(part);
+      if (pos === 0) {
+        walk(len, part, num, num);                              // first operand takes no operator
+      } else {
+        walk(pos + len, expr + "+" + part, value + num, num);
+        walk(pos + len, expr + "-" + part, value - num, -num);
+        walk(pos + len, expr + "*" + part, value - prev + prev * num, prev * num);
+      }
+    }
+  };
+  walk(0, "", 0, 0);
+  return out;
+}
+
+/** Compression III — produce an LZ encoding at least as short as the game's own.
+ *
+ *  The validator is `answer.length <= encoded.length && comprLZDecode(answer) === plain`, where
+ *  `encoded` is the game's DP-optimal encoding. So "any valid encoding" is NOT enough — this has to
+ *  be optimal too. Hence a real dynamic program rather than a greedy pass.
+ *
+ *  Chunks alternate literal/backref (see lzDecompress). Costs: a literal of length L is 1+L characters
+ *  (length digit + the literals); a backref is 2 (length digit + offset digit); a zero-length chunk is
+ *  1 and exists purely to switch type without consuming input.
+ *
+ *  Two arrays per position, because the cost depends on whose turn it is:
+ *    A[pos] = cheapest encoding of plain[pos..] with a LITERAL chunk due
+ *    B[pos] = cheapest encoding of plain[pos..] with a BACKREF chunk due
+ *  and the primed variants forbid a zero-length chunk. That's what stops the search cycling: a zero
+ *  literal followed by a zero backref costs 2 and returns to the identical state, so it can never be
+ *  optimal, and forbidding it makes the recurrence well-founded instead of circular.
+ *
+ *  A backref is legal at pos with offset X and length L iff X <= pos and plain[pos+k] === plain[pos-X+k]
+ *  for every k — the decoder's output so far is exactly plain[0..pos-1], so overlapping copies (X < L)
+ *  are checked correctly by that same test. */
+function lzCompress(plain) {
+  const n = plain.length;
+  if (n === 0) return "";
+  const INF = Infinity;
+  // A/B allow a zero-length chunk; A0/B0 forbid one.
+  const A = new Array(n + 1).fill(INF), B = new Array(n + 1).fill(INF);
+  const A0 = new Array(n + 1).fill(INF), B0 = new Array(n + 1).fill(INF);
+  A[n] = B[n] = 0;
+
+  /** Longest run at `pos` that a backref of offset X can reproduce, capped at 9. */
+  const runFor = (pos, x) => {
+    let len = 0;
+    while (len < 9 && pos + len < n && plain[pos + len] === plain[pos - x + len]) len++;
+    return len;
+  };
+
+  for (let pos = n - 1; pos >= 0; pos--) {
+    let best = INF;
+    for (let len = 1; len <= 9 && pos + len <= n; len++) {
+      const cost = 1 + len + B[pos + len];
+      if (cost < best) best = cost;
+    }
+    A0[pos] = best;
+
+    best = INF;
+    for (let x = 1; x <= 9 && x <= pos; x++) {
+      const max = runFor(pos, x);
+      for (let len = 1; len <= max; len++) {
+        const cost = 2 + A[pos + len];
+        if (cost < best) best = cost;
+      }
+    }
+    B0[pos] = best;
+
+    A[pos] = Math.min(A0[pos], 1 + B0[pos]);
+    B[pos] = Math.min(B0[pos], 1 + A0[pos]);
+  }
+
+  // Walk the table back out, emitting the chunks that achieved the optimum.
+  let out = "";
+  let pos = 0, literal = true;
+  while (pos < n) {
+    if (literal) {
+      if (A[pos] === 1 + B0[pos] && A0[pos] !== A[pos]) { out += "0"; literal = false; continue; }
+      let pick = -1;
+      for (let len = 1; len <= 9 && pos + len <= n; len++) {
+        if (1 + len + B[pos + len] === A0[pos]) { pick = len; break; }
+      }
+      out += String(pick) + plain.substr(pos, pick);
+      pos += pick;
+      literal = false;
+    } else {
+      if (B[pos] === 1 + A0[pos] && B0[pos] !== B[pos]) { out += "0"; literal = true; continue; }
+      let pickLen = -1, pickX = -1;
+      outer: for (let x = 1; x <= 9 && x <= pos; x++) {
+        const max = runFor(pos, x);
+        for (let len = 1; len <= max; len++) {
+          if (2 + A[pos + len] === B0[pos]) { pickLen = len; pickX = x; break outer; }
+        }
+      }
+      out += String(pickLen) + String(pickX);
+      pos += pickLen;
+      literal = true;
+    }
+  }
+  return out;
+}
+
+/** HammingCodes: Integer to Encoded Binary — the inverse of hammingDecode above.
+ *
+ *  Layout: index 0 is the overall parity, every power-of-two index is a section parity, everything
+ *  else is data, most significant bit first. The codeword is SHORTENED, not padded to a power of two:
+ *  we take the fewest parity bits p with (2^p - 1 - p) >= dataBits, giving a total of data + p + 1.
+ *
+ *  The parity bits fall out of one XOR. Lay the data in with parities zeroed, XOR the indices of every
+ *  set bit, and the result read bitwise IS the parity vector — bit k belongs at position 2^k. Setting
+ *  them that way drives the whole XOR to zero, which is exactly the property hammingDecode relies on
+ *  to locate a flipped bit. Position 0 goes in last, making the total number of set bits even.
+ *
+ *  Returns a STRING, which is what the contract validates. */
+function hammingEncode(value) {
+  const data = Number(value).toString(2).split("").map(Number);
+  let p = 0;
+  while (Math.pow(2, p) - 1 - p < data.length) p++;
+  const total = data.length + p + 1;
+  const bits = new Array(total).fill(0);
+  let d = 0;
+  for (let i = 3; i < total; i++) {
+    if ((i & (i - 1)) === 0) continue;                    // power of two -> parity slot
+    bits[i] = data[d++];
+  }
+  let x = 0;
+  for (let i = 1; i < total; i++) if (bits[i] === 1) x ^= i;
+  for (let k = 0; 1 << k < total; k++) bits[1 << k] = (x >> k) & 1;
+  let count = 0;
+  for (let i = 1; i < total; i++) count += bits[i];
+  bits[0] = count % 2;
+  return bits.join("");
+}
+
+/** Largest Rectangle in a Matrix — the largest all-ZERO rectangle, returned as CORNERS.
+ *
+ *  Two things make this unlike the textbook problem, and either one silently fails the contract:
+ *    - it maximises a rectangle of 0s, not 1s;
+ *    - the answer is [[r1,c1],[r2,c2]] — ROW first, column second, bottom-right INCLUSIVE — not an area.
+ *
+ *  The validator only requires that our rectangle is in bounds, contains no 1s, and has the SAME AREA
+ *  as its own answer. So any maximal rectangle passes; we don't have to find the same one.
+ *
+ *  Method: build a histogram of consecutive zeros ending at each cell going down, then for each row
+ *  widen left and right while the neighbouring bars are at least as tall. Grids are 4-15 per side, so
+ *  the simple quadratic widening is plenty and much easier to read than a stack. */
+function largestRectangle(grid) {
+  const rows = grid.length, cols = grid[0].length;
+  const hist = Array.from({ length: rows }, () => new Array(cols).fill(0));
+  for (let c = 0; c < cols; c++) {
+    let run = 0;
+    for (let r = 0; r < rows; r++) {
+      run = grid[r][c] === 0 ? run + 1 : 0;
+      hist[r][c] = run;
+    }
+  }
+  let best = 0, top = 0, left = 0, bottom = 0, right = 0;
+  for (let r = 0; r < rows; r++) {
+    const row = hist[r];
+    for (let c = 0; c < cols; c++) {
+      const h = row[c];
+      if (h === 0) continue;
+      let l = c, rr = c;
+      while (l - 1 >= 0 && row[l - 1] >= h) l--;
+      while (rr + 1 < cols && row[rr + 1] >= h) rr++;
+      const area = (rr - l + 1) * h;
+      if (area > best) { best = area; top = r - h + 1; left = l; bottom = r; right = rr; }
+    }
+  }
+  // An all-1s grid has no valid rectangle at all; mirror the game's own degenerate [[0,0],[0,0]].
+  return [[top, left], [bottom, right]];
+}
+
+/** Total Number of Primes — count primes in [low, high], both ends inclusive.
+ *
+ *  The contract caps low at 5,000,000 and high at low + 1,000,000, so a plain sieve to `high` is at
+ *  most a ~6 MB Uint8Array — cheap enough that a segmented sieve would only add bugs. Bounds are
+ *  sorted defensively and clamped at 2, since low may legitimately be 0 or 1. */
+function totalPrimesInRange(data) {
+  const a = Number(data[0]), b = Number(data[1]);
+  const high = Math.max(a, b);
+  const low = Math.max(2, Math.min(a, b));
+  if (high < 2 || high < low) return 0;
+  const composite = new Uint8Array(high + 1);
+  for (let i = 2; i * i <= high; i++) {
+    if (composite[i]) continue;
+    for (let j = i * i; j <= high; j += i) composite[j] = 1;
+  }
+  let count = 0;
+  for (let i = low; i <= high; i++) if (!composite[i]) count++;
+  return count;
+}
+
 // ---------- type -> solver dispatch ----------
 
 const solvers = {
@@ -287,6 +583,23 @@ const solvers = {
   "Compression I: RLE Compression": (d) => rleCompress(d),
   "Encryption I: Caesar Cipher": (d) => caesarCipher(d[0], d[1]),
   "Encryption II: Vigenère Cipher": (d) => vigenereCipher(d[0], d[1]),
+  "Compression II: LZ Decompression": (d) => lzDecompress(d),
+  "HammingCodes: Encoded Binary to Integer": (d) => hammingDecode(d),
+  "Square Root": (d) => squareRootNearest(d),
+  "Find All Valid Math Expressions": (d) => findMathExpressions(d),
+  "Compression III: LZ Compression": (d) => lzCompress(d),
+  "HammingCodes: Integer to Encoded Binary": (d) => hammingEncode(d),
+  "Largest Rectangle in a Matrix": (d) => largestRectangle(d),
+  "Total Number of Primes": (d) => totalPrimesInRange(d),
+};
+
+// Exported so contract-finder.test.mjs can prove these under plain Node before they ever touch a
+// real contract. A wrong answer burns one of a contract's limited tries, so "it looks right" is not
+// good enough — see the test file for the worked cases behind each solver.
+export {
+	lzDecompress, hammingDecode, squareRootNearest, findMathExpressions,
+	lzCompress, hammingEncode, largestRectangle, totalPrimesInRange,
+	solvers,
 };
 
 // ---------- scanner ----------

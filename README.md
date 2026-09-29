@@ -162,10 +162,10 @@ misbehaves.
 | **early-hacking-template.js** | The reactive worker used by fallback mode. Fine on its own for a beginner. |
 | **xp-farm.js** | Weaken-for-XP worker. Fallback mode points otherwise-idle RAM at it to farm hacking XP (weaken needs only root, not level) — turning surplus capacity into the levels that unlock more targets. |
 | **purchase-servers.js** | Standalone "buy a fleet of servers" script. The commander does this too. |
-| **contract-finder.js** | Finds coding contracts network-wide and auto-solves the ~22 types it knows (never guesses blind). The commander runs it automatically; run it yourself with `--auto-solve`, or list-only with no flags. |
+| **contract-finder.js** | Finds coding contracts network-wide and auto-solves the 30 types it knows (never guesses blind — a wrong answer burns one of a contract's limited tries). The commander runs it automatically; run it yourself with `--auto-solve`, or list-only with no flags. Its solvers are spec'd by `contract-finder.test.mjs` under plain Node. |
 | **reset-scripts.js** | Surgical reset — kills only the commander's own script family (its controllers + workers) across home + cloud + world, sparing everything else (notably `stock-trader.js`). Run before a version hand-off, or to halt the rig fast. |
 | **stock-trader.js** | 4S stock-market bot (long-only): buys strong-forecast stocks, sells on flips, and honors a `keepLiquid` cash reserve. A separate income stream that survives a rig reset. |
-| **liquidate.js** | One-shot "sell everything, go to cash" for the stock portfolio. Pair with `kill stock-trader.js`. |
+| **liquidate.js** | One-shot "sell everything, go to cash" for the stock portfolio. Pair with `kill stock-trader.js`. **Run it before every augmentation install** — an install re-initialises the stock market and your positions are destroyed, though your WSE/TIX/4S purchases survive. |
 | **traceroute.js** | Prints the `connect` path from `home` to any server (case-insensitive, with a "did you mean"). Handy for reaching backdoor targets after the per-install network reshuffle. |
 | **formulas-api-reference.md** | Notes on Bitburner's Formulas API — signatures, gotchas, examples. |
 
@@ -223,6 +223,9 @@ run ascend.js --install --cb boot.js   # ...and pull the trigger, then reboot ev
 **Two things survive an augmentation install: your gang and your corporation.** So an install costs
 you nothing on those fronts, and there's no reason to hesitate over one.
 
+*(One exception, learned in BitNode 9: your **hacknet** does not survive, and when the hacknet is your
+income plan an install is expensive rather than free. Batch your augmentations there.)*
+
 ---
 
 ## Passive income: gang and sleeves
@@ -236,43 +239,110 @@ you nothing on those fronts, and there's no reason to hesitate over one.
 
 ---
 
-## The corporation (BitNode 3)
+## The hacknet and hashes (BitNode 9)
 
-BN3 is a money-starvation node: hacking income lands at roughly **0.8% of normal** while
-augmentations cost 3× money *and* 3× reputation. No amount of tuning the hacking rig pays for that
-node. **The corporation is the income plan; everything else is support.** Run properly it goes from
-\$150b of seed money to revenue in the billions per second.
+The hacknet is the one income stream this repo never automated, and BN9 "Hacktocracy" is the node
+built around it. The work is at the *evidence-gathering* stage rather than the rig stage, so these
+three scripts are honest about what they don't know yet.
 
-It is a *lot* of small scripts, and that is not an accident. Every `ns.corporation.*` function costs
-10–20 GB of RAM just for being **mentioned** in a file, so a single manager touching most of the API
-lands around 700 GB. The rig is instead a nearly-free conductor (~3.6 GB, using only the five 0-GB
-calls) that launches one short-lived module at a time — peak usage is *conductor + largest module*.
+BN9 is a strange place, and three of its numbers drive everything:
 
-**Start with the runbook**, the same way the darknet has one:
+- **`CloudServerLimit` is 0** — you cannot buy a single cloud server (confirmed in-game). Hacknet
+  servers are the only compute you can purchase, home RAM costs 5×, and `purchase-servers.js` is
+  dead weight here. **RAM is this node's real currency.**
+- **`ServerMaxMoney` 0.01 × `ScriptHackMoney` 0.1** — hacking income is ~0.1% of normal, so the
+  hacking rig is not the income plan in BN9.
+- **`HacknetNodeMoney` is NOT set** — despite being the hacknet BitNode, BN9 applies no penalty to
+  hash production. (Nodes 4/5/6/10/11 do; 9 doesn't.)
 
-- **`bn3-runbook.md`** — the *how*: the three loops, the round-by-round plan, a command cheat sheet
-  and a troubleshooting table.
-- **`corp-design.md`** — the *why*: the RAM wall, the confirmed API surface, and the field findings
-  behind every decision.
+The tension the rig has to solve: hash gain scales with **free** RAM, so every GB you lend a batcher
+is production you switched off — and `commander.js` will happily deploy onto hacknet servers without
+a word in any log. `hacknet-scan.js` prices that tradeoff in dollars/hour.
+
+Read **`hacknet-design.md`** for the *why* — the full BN9 multiplier table, all 11 hash upgrades with
+costs and target requirements, the calibration that makes `Formulas.exe` unnecessary, and the "first
+40 corporation-fund sales beat everything else" finding. Every claim is tagged [SRC] (read from the
+v3.0.1 release tag), [LIVE] (confirmed in-game) or [OPEN].
 
 | File | What it is |
 |---|---|
-| **corp-conductor.js** | The resident brain. Keeps the supply and morale controllers alive, refreshes shared state, re-asserts Market-TA.II, and shouts about the two silent killers (no sell order = \$0/s; congestion = production halted). Spending is opt-in via `--auto-*` flags. |
-| **corp-report.js** | Everything about the corporation in one paste-back block. Reads, never spends. Backed by `corp-scan-corp.js`, `corp-scan-city.js`, `corp-scan-cost.js`. |
-| **corp-boot.js / corp-division.js / corp-cities.js / corp-warehouses.js** | Standing the corporation up: industry, six cities, warehouses. |
-| **corp-office.js / corp-hire.js / corp-jobs.js / corp-morale.js** | Staff: office size, hiring, the job mix, and holding morale at 100 (the 10/10 floor is **1%** production). |
-| **corp-sell.js / corp-buy.js / corp-supply.js / corp-smartsupply.js** | Sell orders (without one, revenue is exactly \$0), input purchasing, and the game's own Smart Supply. |
-| **corp-boost.js / corp-warehouse-upgrade.js** | Boost materials as a *share of the warehouse*, solved from each industry's factors — and the warehouse levels that make room. |
-| **corp-export.js** | Inter-division transfers. There is no import API; an import is the far end of an export. |
-| **corp-product.js** | Round 3+: always keep a product in development, and price what's finished. This is where the exponential curve lives. |
-| **corp-ta.js** | Switches Market-TA.II *on*. Researching it does nothing until the per-item flag is set — and every new product arrives with it off. |
-| **corp-upgrade.js / corp-advert.js / corp-research.js** | Spending the funds: corporation-wide upgrade levels, AdVert where the industry's factor justifies it, and research. |
-| **corp-bribe.js** | Corporation funds → faction reputation at \$1b/point, once valuation clears \$100t. This is how you buy through BN3's 3× reputation wall. |
-| **corp-dividend.js** | The dividend rate — the tap that finally moves money into your *wallet*. Corporation funds are not your money. |
+| **hacknet-api.js** | Throwaway live-API probe, the same shape as `dnet-api.js`/`gang-api.js`/`corp-api.js`. Dumps the real surface, the live shapes, the BitNode context and the hash shop's price curve. Read-only; flushes to a file after every section so a crash still leaves evidence. |
+| **hacknet-scan.js** | Read-only dashboard: what the fleet produces, whether hashes are overflowing (they're discarded silently), the whole shop priced in seconds-of-production, and every hardware upgrade ranked by dollars per extra hash/sec. |
+| **hacknet-spend.js** | The one that spends, and only with `--go`. It measures the before/after deltas of a purchase rather than trusting what a guide says it does. `--discover` surveys which upgrades need a target argument — something no getter will tell you. |
+| **ram-costs.js** | Prices every `ns` function with `ns.getFunctionRamCost` and every script with `getScriptRam`, side by side. Written because a read-only probe came back at 11.65 GB on a 32 GB home — and because in BN9 you cannot buy your way out of a RAM shortage. |
+| **money-sources.js** | Dumps `ns.getMoneySources()` biggest-first. The honest answer to "my cash is climbing and I don't know why", which is a harder question than usual in a node that nerfs most income streams unevenly. |
 
-Every one of them reports before it acts, takes `--dry` and `--help`, and is safe to re-run. The
-genuinely one-way levers — accepting an investment offer, going public, discontinuing a product —
-are deliberately **not** scripted and stay manual buttons.
+```
+run hacknet-api.js       # first: what is actually here?
+run hacknet-scan.js      # then: what's it doing, and what should I buy next?
+run money-sources.js     # where is the money actually coming from?
+run ram-costs.js         # what is everything costing me in RAM?
+```
+
+None of them need `Formulas.exe` — `hacknet-scan.js` implements the confirmed gain formula and
+calibrates it against live production, which also folds in every multiplier automatically.
+
+---
+
+## Intelligence (BitNode 5)
+
+BN5 "Artificial Intelligence" grants the **intelligence** stat — the one stat that survives every
+reset, forever, and quietly boosts hacking, reputation, crime, `share()` and program creation. The
+node itself is gentle (hacking pays 15%, cloud servers work, contracts pay full price, the darknet
+pays 70% — its best anywhere), and just standing in it hands you `Formulas.exe` free at every
+reset plus a working `ns.getBitNodeMultipliers()`.
+
+Like the hacknet before it, this rig starts as *evidence-gathering*: **`bn5-design.md`** is the
+*why* — the full multiplier table, everything intelligence boosts and every source of int XP with
+real numbers, all read from the v3.0.1 source and tagged [SRC] until the probes below promote them
+to [LIVE].
+
+| File | What it is |
+|---|---|
+| **int-api.js** | Read-only probe, the `hacknet-api.js` shape: node context, the int level/exp baseline and curve check, live-vs-source diffs of the BN5 *and* BN9 multiplier tables, the API surface, the exact enum strings the labs need, and a free RAM price list. Run this first. |
+| **int-delta.js** | The player-action lab (acts only with `--go`): a travel round-trip (the cleanest unit test — exactly +0.00006 XP), a timed university class (solves the real study multiplier from the delta), one crime. Measures before/after instead of trusting any table, including ours. |
+| **int-sleeve-delta.js** | Puts a sleeve in a Computer Science class and tests whether its int XP really mirrors to the player at ×(sync/100). If it does, eight sleeves in a classroom are a ~1,300 XP/hour intelligence farm that runs itself — and the sleeve is left studying on purpose. Needs sleeves (SF10, or being in BN10); it reports and exits cleanly if you have none. |
+| **int-farm.js** | The farm the probes earned: creates `b1t_flum3.exe`, deletes it, creates it again, forever — ~360 int XP/hour (program creation pays 0.1 XP per second worked, and the delete-recreate loop was confirmed live). Runs unfocused so you keep your screen, but it *does* own your player action — kill it to do faction work. It only ever `rm`s the file it makes; **never `run b1t_flum3.exe` yourself** (running it flumes you out of the BitNode). |
+
+```
+run int-api.js                       # first: what is actually here, and do the tables match?
+run int-delta.js --travel --go       # cheapest possible sanity check ($400k, exact expected value)
+run int-delta.js --class --go        # 60s of class; the solved factor picks the right story
+run int-sleeve-delta.js --go         # the sleeve mirror (needs sleeves — SF10 or BN10)
+run int-farm.js                      # then: the payoff — farm ~360 int XP/hour while idle
+```
+
+One farm needs no new script at all: **buying an augmentation grants 15 int XP** — so `ascend.js`,
+the flywheel you already run, is also the strongest int burst in the game. Every NeuroFlux level
+counts. (Augs cost 2× money in BN5; the flywheel spins slower, but every spin now compounds twice.)
+
+---
+
+## The corporation
+
+In BN3 the corporation is the whole income plan (hacking earns ~0.8% of normal there). Anywhere
+else it's the long-game money engine you start once something like a gang is already paying.
+Starting one outside BN3 costs \$150b of your own money, and getting profit *out* means going
+public and selling shares.
+
+It used to be 29 small scripts, because every `ns.corporation.*` function costs 10–20 GB just for
+being mentioned in a file and the rig had to fit a 64 GB home. With a big home that wall is gone
+(the whole API in one file is 961.6 GB, under the game's 1 TB per-script cap), so it's now four
+files, split by *job*. The old rig is intact in `archive/` for small-home nodes.
+
+- **`corp-runbook.md`**: the *how*. First run, rounds, getting money out, cheat sheet, troubleshooting.
+- **`corp-design.md`**: the *why*. The rewrite, the RAM rules read from source, and the field
+  findings behind every decision.
+
+| File | What it is |
+|---|---|
+| **corp.js** | The resident manager (~495 GB). Every cycle, right after SALE: fills seats and holds the job mix, keeps morale up, puts a sell order on everything produced (the default is none, i.e. \$0/s), buys inputs or switches Smart Supply on, keeps a product in development and priced, keeps the Market-TA.II flags on. `--auto` also spends: upgrades (Wilson first), AdVert, research, boost materials. |
+| **corp-do.js** | One-shot commands you run on purpose: `create`, `expand`, `office`, `warehouse`, `jobs`, `export`, `sell`, `unlock`, `research`, ... and the one-way levers `accept`, `public`, `sellshares`, which need `--yes`. |
+| **corp-report.js** | Everything about the corporation in one paste-back block, ending in a FLAGS section. Reads, never spends. |
+| **corp-lib.js** | The shared maths (boost split, job mixes, supply controller, price hunt), specced by `node corp-lib.test.mjs`. |
+
+`corp.js` never accepts an offer, goes public, sells shares, or retires a product without
+`--rotate`. Those stay yours.
 
 ---
 
@@ -302,9 +372,17 @@ are deliberately **not** scripted and stay manual buttons.
   copies fit.
 - **Cloud servers always have 1 CPU core; `home` can have more.** Cores boost
   grow/weaken only. So buy cloud servers for raw RAM, and value cores only on home.
-- **Installing Augmentations wipes your cloud servers and your programs**
-  (including `Formulas.exe`) — but keeps your `home` RAM and your scripts. After a
-  reset, the rig drops to fallback mode until you re-buy Formulas. Just re-run it.
+- **Installing Augmentations destroys your stock POSITIONS but keeps your stock
+  PURCHASES.** `prestigeAugmentation()` calls `initStockMarket()`, which deletes every
+  `Stock` object and rebuilds it — shares included. Your WSE account, TIX API and 4S
+  data are only reset on a *BitNode* change, so they're a once-per-node purchase. Always
+  `run liquidate.js` before installing; holding through one is pure loss.
+- **Installing Augmentations wipes your cloud servers, your programs and your
+  hacknet** (including `Formulas.exe` and every hacknet node/server) — but keeps your
+  `home` RAM and your scripts. After a reset, the rig drops to fallback mode until you
+  re-buy Formulas. Just re-run it. The hacknet loss barely matters in most BitNodes; in
+  **BitNode 9 it's severe**, because the free level-100 starter server is granted only on
+  entering a BitNode, not on installing — see `hacknet-design.md`.
 
 ---
 

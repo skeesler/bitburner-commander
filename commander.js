@@ -80,7 +80,7 @@ export async function main(ns) {
   const self = ns.getScriptName();
   const baseline = ns.read(self);
 
-  let tick = 0, lastRooted = -1, lastReserve = -1;
+  let tick = 0, lastRooted = -1, lastReserve = -1, lastHacknet = -1;
   // Auto-size is RATCHETED so money thrashing (stock sales, income spikes) doesn't churn it:
   //   - committedRam only ever grows — never proposes a smaller size, so no downsize churn;
   //   - a bigger size must stay affordable for RAMP_TICKS before we adopt it (ignore blips), and
@@ -101,7 +101,15 @@ export async function main(ns) {
       ns.print(`↻ ${self} changed on disk — reloading into the new version.`);
       return ns.spawn(self, { threads: 1, spawnDelay: 500 }, ...ns.args);
     }
-    const all = scanAll(ns);
+    const hacknet = hacknetHosts(ns);
+    const all = scanAll(ns, hacknet);
+    if (hacknet.size !== lastHacknet) {
+      if (hacknet.size) {
+        ns.print(`excluding ${hacknet.size} hacknet server(s) from the net: ${[...hacknet].join(", ")}`);
+        ns.print(`  (their RAM is hash production, not batcher capacity — and getServerMaxMoney throws on them)`);
+      }
+      lastHacknet = hacknet.size;
+    }
     rootAll(ns, all);
 
     // Cash-awareness: hold back enough to afford the next dark-web tool you don't
@@ -208,8 +216,8 @@ function solveContracts(ns) {
   ns.exec(CONTRACT_FINDER, "home", 1, "--auto-solve", "--quiet");
 }
 
-/** Breadth-first walk of the whole network from home. */
-function scanAll(ns) {
+/** Breadth-first walk of the whole network from home, minus the hosts in `exclude`. */
+function scanAll(ns, exclude = new Set()) {
   const seen = new Set(["home"]);
   const queue = ["home"];
   while (queue.length) {
@@ -218,7 +226,42 @@ function scanAll(ns) {
     }
   }
   seen.delete("home");
+  for (const h of exclude) seen.delete(h);
   return [...seen];
+}
+
+/**
+ * Hostnames of our hacknet SERVERS, which must be dropped from the walk.
+ *
+ * Hacknet servers are real machines on the network — ns.scan() returns them and they have RAM — but
+ * they are not servers in the sense the rest of this file means. ns.getServerMaxMoney REFUSES to run
+ * on one ("Cannot be executed on hacknet-server-0. The server must not be a hacknet server"), which
+ * crashed rankTargets the first time the commander ran in BitNode 9. Excluding them here rather than
+ * at each call site keeps rootAll/rankTargets/worldHosts/farmIdleRam honest with one change.
+ *
+ * Dropping them is right for TWO reasons, and the second is the one that isn't obvious:
+ *   - they can never be hack targets — no money, and the API says so outright;
+ *   - they shouldn't be batcher HOSTS either. Hash gain scales with a server's FREE ram (the rate
+ *     carries a `1 - ramUsed/maxRam` term), so any RAM we borrow is paid for in hashes. In BN9 that
+ *     is a catastrophic trade: hacking earns ~0.1% of normal there while the hacknet is the whole
+ *     income plan. Nothing in this script's log would ever have mentioned the cost.
+ *
+ * Costs 1.0 GB (numNodes + getNodeStats, 0.5 GB each — the whole ns.hacknet namespace is 0.5/fn).
+ * Reading hostnames from the hacknet API beats matching a "hacknet-server-" prefix: authoritative,
+ * and it survives a rename. Hacknet NODES (the pre-SF9 kind) never appear in ns.scan at all, so
+ * there this returns names that match nothing — harmless.
+ */
+function hacknetHosts(ns) {
+  const out = new Set();
+  try {
+    const n = ns.hacknet.numNodes();
+    for (let i = 0; i < n; i++) {
+      const s = ns.hacknet.getNodeStats(i);
+      const host = s?.hostname ?? s?.name;
+      if (host) out.add(host);
+    }
+  } catch { /* no hacknet access at all — nothing to exclude */ }
+  return out;
 }
 
 /** Open ports with every owned cracker, then nuke anything we now can. */

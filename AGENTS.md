@@ -35,10 +35,35 @@ scripts, co-written by Sara and an assistant across sessions. Read this before w
   install behind `--install`, restore `.exe` programs on the other side.
 - `gang-manager.js`, `sleeve-manager.js`, `grafting-queue.js` — the other passive income and
   stat streams. Both a gang and a corporation **survive an augmentation install**.
-- `corp-*.js` — the corporation rig, and the point of BitNode 3. Many small scripts rather than
-  one manager, entirely because of the RAM wall (see `corp-design.md`). **Read `bn3-runbook.md`
-  (the *how*) and `corp-design.md` (the *why*) before touching any of it.**
+- `corp.js` / `corp-do.js` / `corp-report.js` / `corp-lib.js` — the corporation rig, rewritten
+  2026-09-27 from 29 RAM-split scripts into four split by job: resident manager, deliberate
+  commands (one-way levers behind `--yes`), read-only report, shared pure logic (specced by
+  `node corp-lib.test.mjs`). The whole corp API in one file is 961.6 GB, under the 1024 GB
+  per-script cap [SRC], so it needs a big home. The old low-RAM rig is in `archive/` with its
+  `bn3-runbook.md`. **Read `corp-runbook.md` (the *how*) and `corp-design.md` → "The 2026-09
+  rewrite" (the *why*) before touching any of it.** Outside BN3 the money tap is `sellshares`,
+  not dividends (tribute exponent 0.75 in BN10).
+- `hacknet-*.js` — the hacknet and its hash economy rig, and the point of **BitNode 9** (Sara ran
+  BN9 2026-09-02 → 2026-09-07, banking SF9.1; she'll return for 9.2 once the corp rig is proven
+  outside BN3). Still at the probe stage. `hacknet-design.md` tags every claim [SRC] (read from the v3.0.1 tag), [LIVE] (confirmed
+  in-game) or [OPEN], and it is the *why*.
+- `int-api.js` / `int-delta.js` / `int-sleeve-delta.js` / `int-farm.js` — the **BN5 /
+  intelligence** rig (current node): read-only surface+table probe, the player-action delta lab,
+  the sleeve-mirror test (shelved — no SF10), and the farm the probes earned: an infinite
+  `b1t_flum3.exe` create/delete loop at ~360 int XP/hr, confirmed live. Split into small scripts
+  for the same RAM reason as the corp rig. `bn5-design.md` is the *why* — its probe record is a
+  clean sweep so far: every [SRC] claim tested has matched live to float precision.
 - `README.md` — the human-facing guide; start there for how the pieces fit together.
+
+> **Current position (2026-09-21): BN6.1 complete** — Operation Daedalus succeeded; bb-conductor v2
+> ran the whole Bladeburner ladder (see `bn6-design.md`, the *why* for that node, and `bb-conductor.js`).
+> Holding SF1.3 / 2.3 / 3.3 / 4.3 / 5.3 / **6.1** / 9.1, plus **SF-1 level 3** (three exploits: every
+> positive player multiplier ×1.001³ ≈ ×1.003, cost multipliers ×0.999³ [SRC: `applyExploits.ts`] —
+> include this in any calibration math). Earlier stated plan: back to BN9 for 9.2; next node is
+> Sara's call. `bn5-design.md` remains the intelligence/int-farm reference, every claim tagged.
+> The darknet pays **70%** here (`DarknetMoneyMultiplier` 0.7 [SRC] — its best value anywhere), so
+> the `dnet-*` rig is back on duty, with one twist: darknet auth time is *multiplied* by
+> `calculateIntelligenceBonus(int, 0.25)`, so intelligence makes cracking slower, not faster.
 
 ## Current frontier: the **DarkNet** (`ns.dnet`)
 
@@ -63,6 +88,45 @@ darknet code. API surface re-derived from the official 3.0 docs, now being confi
   reactive, promotes to batching once the usable pool clears `BATCH_MIN_POOL`, demotes back (raising
   the bar) if hack income stalls. `--reactive` still force-pins the old behavior.
 
+- **Every `ns.hacknet.*` function costs 0.50 GB** — all 21, so the namespace is 10.5 GB if you touch
+  it all [LIVE 2026-09-02]. Budget half a gig per distinct hacknet function a script names. More
+  generally: **`ns.getFunctionRamCost(name)` exists and is free** — use it instead of estimating, and
+  `ram-costs.js` prints it for a curated set plus `getScriptRam` for our own scripts side by side.
+  Reference points from that run: `corporation.research` 20 GB, `corporation.getCorporation` and
+  `codingcontract.attempt` 10 GB, `getBitNodeMultipliers` 4, `getServer` 2, `cloud.getServerNames`
+  **1.05** but `cloud.getServerLimit` only 0.05, and all of `ns.formulas.*` **0**.
+  - **The bare-name trap bit us again, in a file documenting the bare-name trap.** `hacknet-spend.js`
+    weighed 16.70 GB against ~6.7 GB of honest usage; the difference was a local helper called
+    **`attempt`**, billed as `ns.codingcontract.attempt` (10 GB) in a script with no contract code.
+    Reading the file will never show you this. **Measure every new script with `ram-costs.js`.**
+- **Stock POSITIONS die on an install; stock PURCHASES don't.** `prestigeAugmentation()` ends with
+  `if (canAccessStockMarket()) initStockMarket();`, and `initStockMarket()` deletes every `Stock` and
+  reconstructs it from metadata — `playerShares` included. But `hasWseAccount`/`hasTixApiAccess`/
+  `has4SData`/`has4SDataTixApi` are reset only in `prestigeSourceFile()`, so the 4S ladder is bought
+  **once per BitNode**, not once per install. `liquidate.js` before an install is therefore mandatory,
+  not tidy-up. In BN9 that ladder costs **$110.2b** (`FourSigmaMarketDataCost` 5 and
+  `FourSigmaMarketDataApiCost` 4 apply; the WSE and TIX API base costs are NOT multiplied).
+- **The hacknet does NOT survive an augmentation install, and in BN9 that is expensive.**
+  `Player.prestigeAugmentation()` does `this.hacknetNodes.length = 0` [SRC], so installing wipes every
+  hacknet node/server exactly like purchased servers. Worse, BN9's free level-100/10-core starter
+  server is granted in `prestigeSourceFile(isFlume)` — **BitNode entry only**, so an install does not
+  give it back, though `b1t_flum3` does (note the parameter). Rebuilding that server from a purchased
+  one costs roughly **$54b** (~$53.8b for levels 1→100 at `1.1^level`, plus ~$72m for cores 1→10).
+  So the README's "two things survive an install: your gang and your corporation" is still true, but
+  in BN9 **`ascend.js`'s assumption that installing is nearly free does not hold** — batch augs there.
+- **Hacknet servers are real hosts on the network, and most `ns.getServer*` calls REFUSE them.**
+  `ns.scan()` returns `hacknet-server-N`, they have RAM and can run scripts — but
+  `ns.getServerMaxMoney` throws *"Cannot be executed on hacknet-server-0. The server must not be a
+  hacknet server."* This crashed `commander.js` on its first run in BN9 (`rankTargets`). `scanAll`
+  now drops them via `hacknetHosts(ns)`, which reads hostnames from `ns.hacknet.getNodeStats` rather
+  than matching a name prefix. Keep them excluded from **hosts** too, not just targets: hash gain
+  carries a `1 - ramUsed/maxRam` term, so borrowing their RAM is paid for in hashes.
+- **Hash overflow is auto-sold, not lost.** When the hash bank is full, `processAllHacknetServerEarnings`
+  converts the excess at the Sell-for-Money rate ($1e6 per 4 hashes) and credits the `"hacknet"` money
+  source [SRC: `HacknetHelpers.tsx`]. A full bank is not an emergency; it is the floor rate on
+  autopilot. Cache is worth buying only to save toward a sink that beats $250k/hash. *(This was
+  initially mis-called as a leak — from reading `storeHashes`'s `wastedHashes` return without reading
+  its caller. Read the call site, not just the function.)*
 - **`typeof x === "function"` does NOT prove an API is usable.** Bitburner keeps *tombstones* for removed
   functions (`setRemovedFunctions`): they survive on the namespace and pass a typeof probe, but throw
   "removed in version X, use Y instead" when called. `ns.corporation` has 74 properties and only 63 real
@@ -81,6 +145,21 @@ darknet code. API surface re-derived from the official 3.0 docs, now being confi
   has tags; `raw.githubusercontent.com/.../v3.0.1/...` gets the released source and the released
   `markdown/`. That's how to check a doc claim without guessing whether it runs ahead of the game —
   though the running game still outranks both.
+  - **Don't guess the file extension.** The tree mixes `.ts` and `.tsx` with no pattern you can
+    predict — `src/Hacknet/HashUpgrades.ts` is TypeScript but `src/Hacknet/data/HashUpgradesMetadata.tsx`
+    is TSX, and guessing wrong just returns a bare 404. List the directory first:
+    `https://api.github.com/repos/bitburner-official/bitburner-src/contents/<path>?ref=v3.0.1`.
+  - **Beware the LEADING question.** A fetcher asked "state the value of X for node 3 and node 9"
+    obligingly produced a number for both — but the key is **absent** from BN9's object entirely. That
+    fabricated `HacknetNodeMoney: 0.1` survived into a design doc and a README before live data killed
+    it. This is a distinct failure mode from a stale doc or a tombstone: **the question presupposed
+    the answer.** Ask "is key K present in case N, and quote it" — never "what is K for N".
+  - **BN9 facts pulled this way** (`src/BitNode/BitNode.tsx` case 9): `CloudServerLimit` **0** (no
+    purchased servers at all — confirmed live), `ServerMaxMoney` 0.01, `ScriptHackMoney` 0.1,
+    `HackExpGain` 0.05, `HackingLevelMultiplier` 0.5, `HomeComputerRamCost` 5,
+    `DarknetMoneyMultiplier` 0.05, `CorporationSoftcap` 0.75. **`HacknetNodeMoney` and
+    `CodingContractMoney` are ABSENT**, i.e. 1.0 — no hacknet penalty, and contracts pay full price.
+    The full table, the 11-entry hash shop and the confirmed gain formula are in `hacknet-design.md`.
 
 ## Conventions
 
@@ -88,8 +167,13 @@ darknet code. API surface re-derived from the official 3.0 docs, now being confi
 - Prefer one self-managing entry point (like `commander.js`) over many manual scripts.
 - Keep the human-readable status/earnings output — Sara likes watching runs.
 - **Before committing, check what you changed.** `node --check <file>` on every edited script (parse
-  errors otherwise only surface in-game), and keep `node dnet-constraints.test.mjs` green — it's the
-  solver's spec; add a test when you add a puzzle-model parser. Both run under plain Node.
+  errors otherwise only surface in-game), and keep all three specs green — `node dnet-constraints.test.mjs`
+  (the darknet solver's spec; add a test when you add a puzzle-model parser) and
+  `node contract-finder.test.mjs` (the coding-contract solvers), plus `node corp-lib.test.mjs`
+  (the corporation maths). **Never add a contract solver
+  without a test**: a wrong answer burns one of a contract's limited tries, and the dispatch KEY
+  is as likely to be wrong as the algorithm — test through the `solvers` map, not just the
+  function. All run under plain Node.
 - **RAM is charged for every `ns.*` a script's imports *mention*, even uncalled.** The darknet crawler
   sits on a knife-edge against 16GB nodes, so check `ns.getScriptRam` (or `mem` in-game) before adding an
   `ns` call to it or a module it imports — a stray `ns.rm`/`ns.heartbleed` can strand its reach.
@@ -97,6 +181,12 @@ darknet code. API surface re-derived from the official 3.0 docs, now being confi
     ignored** (`RamCalculations.ts:225-249`). A local helper or property named `probe` bills you
     `ns.dnet.probe`; one named `research` bills **20GB** for `ns.corporation.research` — in a file that
     never touches either namespace. Name locals defensively.
+  - **...but strings, comments and unused imports are free** [LIVE 2026-09-27]. The walker bills
+    real code identifiers only: `corp-report.js` prints the words `research`, `sellShares` and
+    `issueNewShares` in its output text and was NOT billed for them, and it pays nothing for the
+    `corp-lib.js` helpers it doesn't import (`mem` 192 GB, matching a count of identifiers in
+    reached code exactly). An estimate that greps the whole file overcounts; strip comments and
+    string literals first, or just run `mem`.
   - **There is no bracket-access loophole.** `const c = ns.corporation; c[name](...)` hides the call from
     the *static* walker, but the runtime enforces a SECOND budget: `updateDynamicRam`
     (`NetscriptHelpers.tsx:434-458`) adds each function's cost the first time it's actually called and

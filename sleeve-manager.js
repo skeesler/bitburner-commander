@@ -5,27 +5,31 @@
  *
  *      run sleeve-manager.js [--crime Mug] [--shock 90] [--sync] [--keepLiquid 0] [--no-augs]
  *
- *  Default behaviour: knock the worst edge off shock, then commit crime on every
- *  sleeve (karma + money + combat xp) and buy any affordable sleeve augs.
+ *  Default behaviour (v2, audited vs bn10-design.md §3 2026-09-21): de-shock to 0,
+ *  Synchronize to 100, THEN commit crime and buy affordable sleeve augs.
+ *  Why shock 0 is not optional: shockBonus = (100-shock)/100 taxes ALL output, and
+ *  sleeve aug purchase is HARD-GATED on shock === 0 [SRC: Sleeve.ts:356]. Passive
+ *  decay is 0.0001/cycle [SRC] — "crime through it" means weeks. BN10 entry clamps
+ *  shock to 25, so full recovery is quick.
  *
  *    --crime NAME     crime every sleeve commits. Default "Mug" (reliable). Switch
  *                     to "Homicide" for far more negative karma once combat is up.
- *    --shock N        run Shock Recovery only while shock% is ABOVE N, then push
- *                     through the rest as it decays. Default 90. Use 0 to fully
- *                     de-shock first (max output), 100 to never recover.
- *    --sync           Synchronize each sleeve to 100% before working (better stat
- *                     transfer). Default off — go straight to crime.
+ *    --shock N        run Shock Recovery only while shock% is ABOVE N. Default 0
+ *                     (fully de-shock: max output, unlocks aug buys). 100 = never.
+ *    --no-sync        skip Synchronize (sync scales stat transfer; starts at
+ *                     max(memory,25) in BN10 [SRC]). Default: sync to 100 first.
  *    --keepLiquid N   min cash on home before buying sleeve augs. Default $0.
  *    --no-augs        never auto-buy sleeve augmentations.
  *
  *  Needs BitNode 10 / Source-File 10. Progress resets with the node; re-run after
- *  each install (or add to ascend-boot.js).
+ *  each install (or add to ascend-boot.js). Sleeve AUGS survive installs [SRC:
+ *  reset only in sleeve.prestige()]; shock/sync survive installs too.
  */
 
 // ---- Tuning ----------------------------------------------------------------
 const CRIME         = "Mug"; // crime every sleeve commits (karma + money + combat xp)
-const SHOCK_ABOVE   = 90;    // run Shock Recovery only while shock% is above this
-const SYNC_TARGET   = 100;   // when --sync is set, Synchronize until sync% reaches this
+const SHOCK_ABOVE   = 0;     // run Shock Recovery only while shock% is above this
+const SYNC_TARGET   = 100;   // Synchronize until sync% reaches this (unless --no-sync)
 const KEEP_LIQUID    = 0;    // min cash on home before buying sleeve augs
 const TICK          = 6000;  // ms between control passes (sleeves update slowly)
 const STATUS_EVERY  = 5;     // print a status line every N ticks
@@ -38,11 +42,12 @@ export async function main(ns) {
   const opts = ns.flags([
     ["crime", CRIME],
     ["shock", SHOCK_ABOVE],
-    ["sync", false],
+    ["no-sync", false],
     ["keepLiquid", KEEP_LIQUID],
     ["no-augs", false],
     ["help", false],
   ]);
+  opts.sync = !opts["no-sync"];
 
   if (opts.help) { printHelp(ns); return; }
 
@@ -67,11 +72,12 @@ export async function main(ns) {
     for (let i = 0; i < n; i++) {
       const s = sl.getSleeve(i);
 
-      // Sync first (opt-in): worthless work until stats actually transfer to you.
-      if (opts.sync && s.sync < SYNC_TARGET) { setTask(ns, sl, i, "SYNCHRO", opts.crime); continue; }
-
-      // Shock recovery: only knock the worst edge off, then crime through the rest.
+      // Shock first: shockBonus = (100-shock)/100 taxes everything (sync work too),
+      // and aug purchase is hard-gated on shock === 0 [SRC: Sleeve.ts:356].
       if (s.shock > opts.shock) { setTask(ns, sl, i, "RECOVERY", opts.crime); continue; }
+
+      // Then sync: syncBonus = sync/100 scales stat transfer; starts at 25 in BN10.
+      if (opts.sync && s.sync < SYNC_TARGET) { setTask(ns, sl, i, "SYNCHRO", opts.crime); continue; }
 
       // Earn: crime for karma + money + combat xp.
       setTask(ns, sl, i, "CRIME", opts.crime);
@@ -140,11 +146,11 @@ function taskLabel(t) {
 
 function printHelp(ns) {
   ns.tprint(
-    "\nsleeve-manager.js — work your BN10 sleeves (crime by default).\n" +
-    "  run sleeve-manager.js [--crime Mug] [--shock 90] [--sync] [--keepLiquid 0] [--no-augs]\n" +
+    "\nsleeve-manager.js — work your BN10 sleeves (de-shock, sync, then crime).\n" +
+    "  run sleeve-manager.js [--crime Mug] [--shock 0] [--no-sync] [--keepLiquid 0] [--no-augs]\n" +
     "  --crime NAME   crime to commit (e.g. Mug, Homicide). Default Mug.\n" +
-    "  --shock N      recover shock only while above N% (0=full de-shock, 100=never). Default 90.\n" +
-    "  --sync         Synchronize to 100% before working. Default off.\n" +
+    "  --shock N      recover shock only while above N% (0=full de-shock, 100=never). Default 0.\n" +
+    "  --no-sync      skip Synchronize-to-100 (it's on by default).\n" +
     "  --keepLiquid N min cash before buying sleeve augs. Default 0.\n" +
     "  --no-augs      don't auto-buy sleeve augs.\n"
   );
