@@ -233,7 +233,7 @@ income plan an install is expensive rather than free. Batch your augmentations t
 | File | What it is |
 |---|---|
 | **gang-manager.js** | Runs a gang end to end: recruits, ascends members past the diminishing-returns point, assigns tasks by what actually pays, and buys equipment. `gang-design.md` is the *why*. |
-| **sleeve-manager.js** | Puts duplicate sleeves to work — crime, faction work, or training — depending on what the run needs. |
+| **sleeve-manager.js** | v3: a *role* per sleeve after shock recovery and sync. **faction** (rep toward augs you still need, one faction per sleeve), **bb** (contracts, Infiltrate Synthoids, Diplomacy, Support), **crime**, **train**, or **idle**. `auto` goes crime-for-a-gang first, then Bladeburner if you're in it, then faction rep. `--roles "bb,bb,faction,…"` sets them per sleeve; `--once` prints the plan. |
 | **grafting-queue.js** | Queues augmentation grafting, which trades time for augs you can't otherwise reach. |
 | **gang-api.js** | Throwaway live-API probe, the same shape as `dnet-api.js`. |
 
