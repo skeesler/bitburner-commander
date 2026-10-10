@@ -43,6 +43,10 @@ scripts, co-written by Sara and an assistant across sessions. Read this before w
   `bn3-runbook.md`. **Read `corp-runbook.md` (the *how*) and `corp-design.md` → "The 2026-09
   rewrite" (the *why*) before touching any of it.** Outside BN3 the money tap is `sellshares`,
   not dividends (tribute exponent 0.75 in BN10).
+- `stanek*.js` + `bn13-design.md` — Stanek's Gift for **BitNode 13** (entered 2026-10-03, Bladeburner
+  route). `stanek-lib.js` is pure geometry/scoring/layout search, specced by `node stanek-lib.test.mjs`
+  on the LIVE fragment table, with the branch-and-bound cross-checked against exhaustive search.
+  **Accept the gift before buying ANY augmentation** (one-way door, bn13-design.md §2).
 - `bn15-design.md` — **BitNode 15** (entered 2026-10-09): the Red Pill is at the bottom of the fifth
   darknet labyrinth, one lab per install. The *why* for everything BN15 added to the `dnet-*` rig:
   `dnet-strategies.js` (pure solvers for RateMyPix.Auth, KingOfTheHill and the maze, specced in
@@ -179,10 +183,10 @@ darknet code. API surface re-derived from the official 3.0 docs, now being confi
 - Prefer one self-managing entry point (like `commander.js`) over many manual scripts.
 - Keep the human-readable status/earnings output — Sara likes watching runs.
 - **Before committing, check what you changed.** `node --check <file>` on every edited script (parse
-  errors otherwise only surface in-game), and keep all three specs green — `node dnet-constraints.test.mjs`
+  errors otherwise only surface in-game), and keep all four specs green — `node dnet-constraints.test.mjs`
   (the darknet solver's spec; add a test when you add a puzzle-model parser) and
   `node contract-finder.test.mjs` (the coding-contract solvers), plus `node corp-lib.test.mjs`
-  (the corporation maths). **Never add a contract solver
+  (the corporation maths) and `node stanek-lib.test.mjs` (the Stanek placer). **Never add a contract solver
   without a test**: a wrong answer burns one of a contract's limited tries, and the dispatch KEY
   is as likely to be wrong as the algorithm — test through the `solvers` map, not just the
   function. All run under plain Node.

@@ -234,6 +234,7 @@ income plan an install is expensive rather than free. Batch your augmentations t
 |---|---|
 | **gang-manager.js** | Runs a gang end to end: recruits, ascends members past the diminishing-returns point, assigns tasks by what actually pays, and buys equipment. `gang-design.md` is the *why*. |
 | **sleeve-manager.js** | v3: a *role* per sleeve after shock recovery and sync. **faction** (rep toward augs you still need, one faction per sleeve), **bb** (contracts, Infiltrate Synthoids, Diplomacy, Support), **crime**, **train**, or **idle**. `auto` goes crime-for-a-gang first, then Bladeburner if you're in it, then faction rep. `--roles "bb,bb,faction,…"` sets them per sleeve; `--once` prints the plan. |
+| **stanek.js** | Stanek's Gift (BitNode 13, or anywhere with SF13). `plan --plan bb` searches every legal layout of a plan's fragments plus boosters on the gift's grid and shows the best; `place --yes` lays it out (clearing the gift loses charges); `charge` runs one big `stanek-charge.js` with all spare RAM, because a fragment's effect grows with the log of its *biggest single* charge. `show` draws the gift with live effects. The *why* is `bn13-design.md`. |
 | **grafting-queue.js** | Queues augmentation grafting, which trades time for augs you can't otherwise reach. |
 | **gang-api.js** | Throwaway live-API probe, the same shape as `dnet-api.js`. |
 
