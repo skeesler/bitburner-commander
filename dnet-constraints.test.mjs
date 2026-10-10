@@ -8,6 +8,7 @@
  * darknet-design.md, and that looted "contains X and Y" intel narrows the search — the flywheel.
  */
 import { constraintsFor, decodeEntities, generate, harvestCandidates, parseText, satisfies, wordsFromLit } from "./dnet-constraints.js";
+import { distanceFromAltitude, parseAltitude, parseLabCoords, parseSpice, parseSurroundings, solveKing, solveSpice, walkLabyrinth } from "./dnet-strategies.js";
 
 let pass = 0;
 let fail = 0;
@@ -181,6 +182,204 @@ console.log("\nsatisfies() unit checks:");
 	ok("mustContain rejects missing char", !satisfies({ ...constraintsFor({}), mustContain: ["9"] }, "123"));
 	ok("between rejects out-of-range", !satisfies(constraintsFor({ details: { length: 2, format: "numeric" }, texts: ["between 10 and 20"] }), "21"));
 	ok("'between' does not leak into mustContain", parseText("a number between 10 and 20").mustContain.length === 0);
+}
+
+
+// ── BN15 models, solved end to end against a simulated server ────────────────────────────────────
+// The fakes reproduce v3.0.1's own formulas (DarkNet/effects/authentication.ts, ServerGenerator.ts):
+// the oracle builds the exact `data` string the game would put in the heartbleed log, and the
+// strategy has to parse it, so this covers grammar + algorithm together.
+
+// Same generator as the game: random digits, leading zeros stripped by Number().
+const gamePassword = (len) => {
+	let s = "";
+	for (let i = 0; i < Math.ceil(len); i++) s += Math.floor(Math.random() * 10);
+	return Number(s).toString();
+};
+
+console.log("\nRateMyPix.Auth (bulls-only Mastermind):");
+{
+	ok("parseSpice '🌶️🌶️/5' → 2", parseSpice("🌶️🌶️/5") === 2);
+	ok("parseSpice '0/5' → 0", parseSpice("0/5") === 0);
+	ok("parseSpice ignores other grammars", parseSpice("yes,yesn't") === null && parseSpice("1234.5") === null);
+
+	// Game: data = one "🌶️" per exact-place match, or "0", then "/" + password length.
+	const spiceOracle = (pw) => async (g) => {
+		if (g === pw) return "win";
+		const pep = pw.split("").map((ch, i) => (ch === g[i] ? "🌶️" : "")).join("") || "0";
+		return parseSpice(`${pep}/${pw.length}`);
+	};
+	const alpha = "0123456789".split("");
+	for (const len of [1, 2, 3, 4, 5, 6]) {
+		let worst = 0, total = 0, wrong = 0;
+		const N = len <= 2 ? 60 : 150;
+		for (let t = 0; t < N; t++) {
+			let pw = gamePassword(len);
+			while (pw.length !== len) pw = gamePassword(len); // the node reports its real length
+			const r = await solveSpice({ length: len, alphabet: alpha }, spiceOracle(pw));
+			if (r.pw !== pw) wrong++;
+			worst = Math.max(worst, r.guesses);
+			total += r.guesses;
+		}
+		ok(`len ${len}: ${N}/${N} cracked (avg ${(total / N).toFixed(1)}, worst ${worst} guesses)`, wrong === 0, `${wrong} wrong`);
+	}
+	// A password that changes mid-solve must end in a clean give-up, not a wrong answer.
+	{
+		let calls = 0;
+		const flip = async (g) => spiceOracle(calls++ < 4 ? "4821" : "1739")(g);
+		const r = await solveSpice({ length: 4, alphabet: alpha }, flip);
+		ok("password changed mid-solve → gives up, no false crack", r.pw === null || r.pw === "1739", JSON.stringify(r));
+	}
+}
+
+console.log("\nKingOfTheHill (find the peak):");
+{
+	ok("parseAltitude reads plain + exponent numbers", parseAltitude("9999.5") === 9999.5 && parseAltitude("3.2e-12") === 3.2e-12);
+	ok("parseAltitude rejects prose", parseAltitude("current altitude: 12 m") === null);
+	ok("distanceFromAltitude inverts the hill (len 2, d=7)", Math.abs(distanceFromAltitude(10000 * Math.exp(-((7 / 2) ** 2)), 2) - 7) < 1e-9);
+
+	// The game's Wichmann–Hill RNG (Casino/RNG.ts), seeded by the password.
+	class WHRNG {
+		constructor(seed) {
+			const v = (seed / 1000) % 30000;
+			this.s1 = this.s2 = this.s3 = v;
+		}
+		random() {
+			this.s1 = (171 * this.s1) % 30269;
+			this.s2 = (172 * this.s2) % 30307;
+			this.s3 = (170 * this.s3) % 30323;
+			return (this.s1 / 30269 + this.s2 / 30307 + this.s3 / 30323) % 1;
+		}
+	}
+	// getKingOfTheHillAltitude, transcribed.
+	const altitude = (pwStr, difficulty, guess) => {
+		const password = Number(pwStr);
+		const x = Number(guess);
+		const rng = new WHRNG(password);
+		const hillCount = Math.min(Math.floor(difficulty / 8), 4) * 2 + 1;
+		const passwordHillIndex = Math.floor(rng.random() * (hillCount - 2)) + 1;
+		const width = 10 ** Math.max(pwStr.length - 2, 0) + 1;
+		const hill = (loc, h) => h * Math.exp(-((x - loc) ** 2) / width ** 2);
+		if (Math.abs((x - password) / password) < 0.03) return hill(password, 10000);
+		let alt = 0;
+		for (let i = 0; i < hillCount; i++) {
+			const locationOffset = (i - passwordHillIndex) * width * 3 * (rng.random() * 0.2 + 0.9);
+			const heightOffset = Math.abs((i - passwordHillIndex) * 2600) * (rng.random() * 0.1 + 0.95);
+			alt += hill(password + locationOffset, 10000 - heightOffset);
+		}
+		return alt;
+	};
+	const kingOracle = (pw, difficulty) => async (g) => (g === pw ? "win" : parseAltitude(`${altitude(pw, difficulty, g)}`));
+
+	// Password length is min(1 + difficulty/6, 10) digits, before leading zeros are stripped.
+	for (const difficulty of [0, 3, 6, 7, 8, 12, 16]) {
+		let worst = 0, total = 0, wrong = 0;
+		const N = 120;
+		for (let t = 0; t < N; t++) {
+			const pw = gamePassword(Math.min(1 + difficulty / 6, 10));
+			const r = await solveKing({ length: pw.length }, kingOracle(pw, difficulty));
+			if (r.pw !== pw) wrong++;
+			worst = Math.max(worst, r.guesses);
+			total += r.guesses;
+		}
+		// One hill (below 8) must always crack. With decoy hills a rare miss is accepted (~1 in 1000 at
+		// difficulty 16–24 in a 1000-per-tier stress run): the solver gives up cleanly and the next pass retries.
+		const floor = difficulty < 8 ? N : Math.ceil(N * 0.97);
+		ok(`difficulty ${difficulty}: ${N - wrong}/${N} cracked (avg ${(total / N).toFixed(1)}, worst ${worst} guesses)${difficulty < 8 ? "" : " — needs ≥97%"}`, N - wrong >= floor, `${wrong} missed`);
+	}
+}
+
+
+console.log("\nThe Labyrinth (maze walk against the game's own generator):");
+{
+	// generateMaze / mazeMaker / getSurroundingsVisualized / handleLabyrinthPassword, transcribed from
+	// v3.0.1 DarkNet/effects/labyrinth.ts.
+	const WALL = "█", PATH = " ";
+	const mazeMaker = (setWidth, setHeight) => {
+		const width = setWidth % 2 === 0 ? setWidth + 1 : setWidth;
+		const height = setHeight % 2 === 0 ? setHeight + 1 : setHeight;
+		const maze = Array.from({ length: height }, () => Array(width).fill(WALL));
+		const stack = [[1, 1]];
+		const dirs = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+		while (stack.length) {
+			const [x, y] = stack.pop();
+			const nb = dirs.map(([dx, dy]) => [x + dx * 2, y + dy * 2]).filter(([nx, ny]) => nx > 0 && nx < width && ny > 0 && ny < height && maze[ny][nx] === WALL);
+			if (nb.length) {
+				stack.push([x, y]);
+				const [nx, ny] = nb[Math.floor(Math.random() * nb.length)];
+				maze[(y + ny) / 2][(x + nx) / 2] = PATH;
+				maze[ny][nx] = PATH;
+				stack.push([nx, ny]);
+			}
+		}
+		return maze;
+	};
+	const generateMaze = (width, height) => {
+		const hw = Math.ceil(width / 2), hh = Math.ceil(height / 2);
+		const m1 = mazeMaker(hw, hh), m2 = mazeMaker(hw, hh), m3 = mazeMaker(hw, hh), m4 = mazeMaker(hw, hh);
+		const top = m1.map((row, y) => row.slice(0, -1).concat(m2[y]));
+		const bottom = m3.map((row, y) => row.slice(0, -1).concat(m4[y]));
+		const maze = top.slice(0, -1).concat(bottom);
+		const sw = m1[0].length - 1, sh = m1.length - 1;
+		maze[Math.floor((Math.random() * hw) / 4) * 2 + 1][sw] = PATH;
+		maze[sh][Math.floor((Math.random() * hh) / 4) * 2 + 1] = PATH;
+		maze[height - (Math.floor((Math.random() * hw) / 4) + 1) * 2 - 1][sw] = PATH;
+		maze[sh][width - (Math.floor((Math.random() * hh) / 4) + 1) * 2 - 1] = PATH;
+		return maze.map((r) => r.join(""));
+	};
+	const around = (maze, x, y) => {
+		const out = [];
+		for (let i = y - 1; i <= y + 1; i++) {
+			let row = "";
+			for (let j = x - 1; j <= x + 1; j++) row += i === y && j === x ? "@" : (maze[i]?.[j] ?? PATH);
+			out.push(row);
+		}
+		return out.join("\n");
+	};
+	const DIR = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] };
+	// One lab: returns what our walker sees, through the same parse helpers dnet-lab.js uses.
+	const lab = (w, h, offset) => {
+		const maze = generateMaze(w, h);
+		const off = () => (offset ? Math.floor(Math.random() * 3) * 2 : 0);
+		const [ex, ey] = [maze[0].length - 2 - off(), maze.length - 2 - off()];
+		let [x, y] = [1 + off(), 1 + off()];
+		const reply = (dir) => {
+			const [dx, dy] = DIR[dir];
+			if (maze[y + dy]?.[x + dx] !== PATH) return { code: 401, message: `You cannot go that way. You are still at ${x},${y}.`, data: around(maze, x, y) };
+			x += dx * 2;
+			y += dy * 2;
+			if (x === ex && y === ey) return { code: 200, message: "You have successfully navigated the labyrinth! Congratulations" };
+			return { code: 401, message: `You have moved to ${x},${y}.`, data: around(maze, x, y) };
+		};
+		const start = { pos: [x, y], open: parseSurroundings(around(maze, x, y)) };
+		// The step adapter dnet-lab.js uses, minus the network.
+		const step = async (dir) => {
+			const r = reply(dir);
+			if (r.code === 200) return { win: true };
+			if (/cannot go/i.test(r.message)) return { wall: true };
+			const open = parseSurroundings(r.data);
+			return open ? { moved: true, open, pos: parseLabCoords(r.message) } : null;
+		};
+		return { start, step, cells: Math.ceil(maze[0].length / 2) * Math.ceil(maze.length / 2) };
+	};
+
+	ok("parseSurroundings reads the 3×3", JSON.stringify(parseSurroundings("█ █\n█@ \n███")) === JSON.stringify({ north: true, east: true, south: false, west: false }));
+	ok("parseLabCoords reads 'moved to 3,5'", JSON.stringify(parseLabCoords("You have moved to 3,5.")) === "[3,5]");
+
+	const labs = [["lab 1", 20, 14, false], ["lab 2", 30, 20, false], ["lab 3", 40, 26, false], ["lab 4–5", 60, 40, true]];
+	for (const [name, w, h, offset] of labs) {
+		let wrong = 0, total = 0, worst = 0, cells = 0;
+		const N = 100;
+		for (let t = 0; t < N; t++) {
+			const L = lab(w, h, offset);
+			const r = await walkLabyrinth(L.start, L.step);
+			if (!r.done) wrong++;
+			total += r.moves;
+			worst = Math.max(worst, r.moves);
+			cells = L.cells;
+		}
+		ok(`${name} (${w}×${h}, ~${cells} cells): ${N - wrong}/${N} solved (avg ${(total / N).toFixed(0)}, worst ${worst} moves)`, wrong === 0, `${wrong} unsolved`);
+	}
 }
 
 console.log(`\n${fail ? "✗" : "✓"} ${pass}/${pass + fail} passed, ${fail} failed\n`);

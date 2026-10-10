@@ -15,22 +15,31 @@
  *     net mutates every ~12s, so an unpinned node migrates out mid-solve. Freeze sacrifices the node's
  *     RAM/loot — accepted for these crack-for-the-flywheel nodes.
  *
- * We make as FEW authenticate calls as possible — nodes 503-rate-limit you if you hammer them,
- * so brute-force is actively harmful. Stops immediately on non-password responses:
+ * Each guess costs a full auth delay, so we still guess as few times as we can. (There is NO rate limit:
+ * the July belief that 503 meant "throttled" was wrong — see below.) Stops immediately on non-password
+ * responses:
  *   200 = success · 401 = wrong · 351 = Direct Connection Required (can't crack from here)
- *   503 = Service Unavailable (rate-limited) · authenticate throw = node offline/migrated
+ *   503 = Service Unavailable = the node went OFFLINE (v3.0.1's only 503 source is a missing server)
+ *   408 = Request Timeout from darknet instability — retried, it says nothing about the guess
+ *
+ * BN15's two models (RateMyPix.Auth, KingOfTheHill) run pure strategies from dnet-strategies.js.
+ *
+ * RAM: the game bills any identifier that shares a name with an ns function, namespace ignored. The guess
+ * helper used to be called `attempt` and cost every crawler 10 GB for ns.codingcontract.attempt.
  *
  * Usage:  run dnet-solve.js <host>   |   import { solve } from "dnet-solve.js"
  *         solve(ns, host, { hints: ["contains 3 and 1", ...], pool: [...wordlist] })
  */
 import { constraintsFor, generate, satisfies, describe, decodeEntities, harvestCandidates } from "dnet-constraints.js";
+import { parseAltitude, parseSpice, solveKing, solveSpice } from "dnet-strategies.js";
 
-/** Bucket an authenticate response: ok | wrong | unreachable | ratelimited. */
+/** Bucket an authenticate response: ok | wrong | unreachable | offline | timeout. */
 function classify(resp) {
 	if (!resp) return "wrong";
 	if (resp.code === 200 || resp.success === true || /success/i.test(resp.message ?? "")) return "ok";
 	if (resp.code === 351) return "unreachable"; // Direct Connection Required
-	if (resp.code === 503) return "ratelimited"; // Service Unavailable
+	if (resp.code === 503) return "offline"; // Service Unavailable: the node no longer exists
+	if (resp.code === 408) return "timeout"; // instability; the guess was never checked
 	return "wrong";
 }
 
@@ -62,7 +71,10 @@ const isYes = (t) => /^yes$/i.test(String(t).trim());
 // Does this feedback look like Mastermind positional tokens (one yes/yesn't per position)?
 const POS_TOKEN = /^(?:yes|yesn'?t|no)$/i;
 const isPositional = (fb, len) => Array.isArray(fb) && fb.length === len && fb.every((t) => POS_TOKEN.test(String(t).trim()));
-const BRUTE_CAP = 60; // only blind-brute a numeric node if constraints shrink it to <= this; else 503-bait
+const BRUTE_CAP = 60; // only blind-brute a numeric node if constraints shrink it to <= this (each guess is a full auth delay)
+// Models with a dedicated feedback strategy in dnet-strategies.js: no static phase, no generic probe.
+const STRATEGY_MODELS = new Set(["RateMyPix.Auth", "KingOfTheHill"]);
+const BLEED_LINES = 20; // log lines per heartbleed: enough to find our guess under the server's own traffic
 
 /** Bulls & cows score for two equal-length strings: [exact-place, right-symbol-wrong-place]. */
 function bullsCows(g, c) {
@@ -109,12 +121,16 @@ function pickBullsGuess(cands) {
  * Per-guess feedback rides heartbleed(), not the authenticate reply (confirmed 2026-07-05).
  * Bleed the node, find the recent-log entry for THIS guess, and return its decoded `data` string
  * (positional tokens for Mastermind, or noisy fuzzy-leak prose for others), else null. Each log
- * entry is a JSON string: {code, message, data, passwordAttempted}.
+ * entry is a JSON string: {code, message, data, passwordAttempted}. With `exact`, only the entry for
+ * this guess counts (no newest-entry fallback): a strategy fed another guess's data would mis-steer.
  */
-async function bleedData(ns, host, guess) {
+async function bleedData(ns, host, guess, { exact = false } = {}) {
 	let res;
 	try {
-		res = await ns.dnet.heartbleed(host);
+		// Defaults are 1 line and DESTRUCTIVE: the server's own traffic lines land in the same log, so one
+		// arriving between our guess and our bleed hid our entry (FAILED zer0_day::c0rp, 2026-10-09).
+		// Read the newest BLEED_LINES without consuming them.
+		res = await ns.dnet.heartbleed(host, { logsToCapture: BLEED_LINES, peek: true });
 	} catch (e) {
 		ns.print(`  heartbleed(${host}) err: ${e}`);
 		return null;
@@ -128,11 +144,15 @@ async function bleedData(ns, host, guess) {
 		} catch {
 			continue; // not our JSON — heartbeat/flavor noise
 		}
-		if (entry && String(entry.passwordAttempted) === String(guess)) match = entry; // newest match wins
+		// Logs arrive NEWEST FIRST, so the first match is the latest attempt with this guess.
+		if (entry && String(entry.passwordAttempted) === String(guess)) {
+			match = entry;
+			break;
+		}
 	}
-	if (!match && logs.length) {
+	if (!match && logs.length && !exact) {
 		try {
-			match = JSON.parse(logs[logs.length - 1]);
+			match = JSON.parse(logs[0]); // newest line
 		} catch {
 			/* noise-only bleed */
 		}
@@ -174,21 +194,24 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 	ns.print(`constraints: ${describe(c)}`);
 
 	let tries = 0;
-	let stop = null; // "unreachable" | "ratelimited" | "error"
+	let stop = null; // "unreachable" | "offline" | "error" | "rerolled"
+	let gaveUp = null; // a strategy's reason for stopping, on a model we DO know
 	let froze = "not-attempted"; // freezeServer outcome — surfaced on a 351 to tell a race from a structural block
 	const tried = new Set(); // never spend a rate-limited guess on a duplicate (static + adaptive overlap)
 	const trace = []; // per-attempt {guess, code, message, data, ms} — dumped on FAILED so a new/odd
 	                  // model is self-diagnosing (esp. TIMING models: watch `ms` track correctness).
-	const attempt = async (guess) => {
+	const guessOnce = async (guess, { again = false } = {}) => {
 		if (guess == null || tries >= max || stop) return null;
 		guess = String(guess);
-		if (tried.has(guess)) return null;
+		if (tried.has(guess) && !again) return null; // `again`: a deliberate re-send whose feedback was lost
 		tried.add(guess);
 		tries++;
 		let resp;
 		const t0 = Date.now();
 		try {
 			resp = await d.authenticate(host, String(guess));
+			// 408 = instability timeout: the guess was never checked, so it tells us nothing. Retry it.
+			for (let retry = 0; retry < 2 && resp?.code === 408; retry++) resp = await d.authenticate(host, String(guess));
 		} catch (e) {
 			ns.print(`  [${tries}] "${guess}" -> ERR ${e}`);
 			trace.push({ guess: String(guess), err: String(e) });
@@ -199,7 +222,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 		trace.push({ guess: String(guess), code: resp && resp.code, message: resp && resp.message, data: resp && resp.data, ms });
 		ns.print(`  [${tries}] "${guess}" -> ${resp && resp.code} ${resp && resp.message}  data=${JSON.stringify(resp && resp.data)} ${ms}ms`);
 		const cls = classify(resp);
-		if (cls === "unreachable" || cls === "ratelimited") stop = cls;
+		if (cls === "unreachable" || cls === "offline") stop = cls;
 		return resp;
 	};
 	const okr = (resp) => classify(resp) === "ok";
@@ -215,9 +238,9 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 
 	// Static phase: everything the constraints can enumerate, cheapest/highest-confidence first. Skipped
 	// for NIL (broadcast) and overflow (over-length payload, not a candidate drawn from the password space).
-	if (det.model !== "NIL" && !isOverflow) {
+	if (det.model !== "NIL" && !isOverflow && !STRATEGY_MODELS.has(det.model)) {
 		for (const g of generate(c)) {
-			if (okr(await attempt(g))) return win(g);
+			if (okr(await guessOnce(g))) return win(g);
 			if (stop) break;
 		}
 	}
@@ -231,14 +254,39 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 		const n = Number(bufMatch[1]) || det.length || 4;
 		for (const p of ["0".repeat(n + 1), "1".repeat(n + 1), "1".repeat(n + 2), "1".repeat(2 * n), "1".repeat(4 * n)]) {
 			if (stop) break;
-			if (okr(await attempt(p))) return win(p);
+			if (okr(await guessOnce(p))) return win(p);
 		}
 	}
 
 	// Adaptive phase — per-guess feedback rides heartbleed(), not the auth reply. PIN mobile nodes
 	// first (freezeServer): a broadcast is ~alphabet guesses × ~10s ≈ 100s, but the net mutates every
 	// ~12s, so an unpinned node migrates out mid-solve. Freeze sacrifices the node's RAM/loot (accepted).
-	if (!stop && !isOverflow && det.length > 0) {
+	if (!stop && STRATEGY_MODELS.has(det.model) && det.length > 0) {
+		// BN15 models (see dnet-strategies.js + bn15-design.md). The oracle: guess, then read THIS guess's
+		// `data` from heartbleed and parse it with the model's grammar. Unparseable ⇒ null ⇒ the strategy stops.
+		const spice = det.model === "RateMyPix.Auth";
+		const parse = spice ? parseSpice : parseAltitude;
+		// A guess's log entry can vanish before we read it: another reader (a second crawler on the same node,
+		// or an old-code one using the destructive 1-line default) takes it (FAILED rogue;tech, 2026-10-09).
+		// So when the entry is missing, send the same guess once more and read again.
+		const ask = async (g) => {
+			for (let round = 0; round < 2; round++) {
+				const r = await guessOnce(g, { again: round > 0 });
+				if (okr(r)) return "win";
+				if (stop || !r) return null;
+				const data = await bleedData(ns, host, g, { exact: true });
+				trace.push({ bleedAfter: g, data });
+				const fb = parse(data);
+				if (fb != null) return fb;
+			}
+			return null;
+		};
+		const res = spice
+			? await solveSpice({ length: det.length, alphabet: alphabet(det.format), numeric: det.format.includes("numeric") }, ask)
+			: await solveKing({ length: det.length }, ask);
+		if (res.pw != null) return win(res.pw);
+		if (!stop) gaveUp = res.why;
+	} else if (!stop && !isOverflow && det.length > 0) {
 		// Pin mobile nodes so the slow broadcast can finish before the ~12s mutation. NOTE: freezeServer
 		// is NOT in the 3.0.1 API (it's in the dev-branch docs only) — guard it so its absence is a clean
 		// no-op, not a throw. If a real pin primitive exists under another name, wire it here.
@@ -259,7 +307,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 
 		const alpha = alphabet(det.format);
 		const first = alpha[0].repeat(det.length);
-		const probe = await attempt(first);
+		const probe = await guessOnce(first);
 		if (okr(probe)) return win(first);
 		const data0 = !stop ? await bleedData(ns, host, first) : null;
 		trace.push({ bleedAfter: first, data: data0 }); // surface the channel on FAILED dumps (new models)
@@ -284,7 +332,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 			apply(first, fb0);
 			for (let s = 1; s < alpha.length && solved.includes(null) && !stop; s++) {
 				const g = alpha[s].repeat(det.length);
-				const r = await attempt(g);
+				const r = await guessOnce(g);
 				if (okr(r)) return win(g);
 				const gdata = await bleedData(ns, host, g);
 				trace.push({ bleedAfter: g, data: gdata });
@@ -293,7 +341,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 			}
 			if (!stop && !solved.includes(null)) {
 				const answer = solved.join("");
-				if (okr(await attempt(answer))) return win(answer);
+				if (okr(await guessOnce(answer))) return win(answer);
 			}
 		} else if (isBullsCows(fb0) && det.format.includes("numeric") && det.length >= 1 && det.length <= 4) {
 			// DeepGreen / bulls & cows: feedback is [exact-place, right-digit-wrong-place] — 2 numeric
@@ -308,7 +356,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 			filterBy(first, fb0.map(Number)); // seed with the probe (e.g. "000" → [0,0])
 			while (cands.length && !stop && tries < max) {
 				const g = pickBullsGuess(cands);
-				if (okr(await attempt(g))) return win(g);
+				if (okr(await guessOnce(g))) return win(g);
 				const fb = feedback({ data: await bleedData(ns, host, g) });
 				trace.push({ bleedAfter: g, data: fb });
 				if (!isBullsCows(fb)) break; // grammar changed / no feedback
@@ -325,7 +373,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 				ns.print(`  heartbleed hint → ${describe(cc)}`);
 			}
 			for (const g of generate(cc)) {
-				if (okr(await attempt(g))) return win(g);
+				if (okr(await guessOnce(g))) return win(g);
 				if (stop) break;
 			}
 			// Last resort: constrained numeric brute — but ONLY if constraints have shrunk the space to a
@@ -339,7 +387,7 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 				}
 				if (cands.length && cands.length <= BRUTE_CAP) {
 					for (const g of cands) {
-						if (okr(await attempt(g))) return win(g);
+						if (okr(await guessOnce(g))) return win(g);
 						if (stop) break;
 					}
 				} else {
@@ -350,9 +398,10 @@ export async function solve(ns, host, { max = 1000, hints = [], pool = [], quiet
 	}
 
 	if (stop === "unreachable") info(`SKIP ${host} (${det.model}): direct connection required (351)  [stationary=${det.raw.isStationary}, freeze=${froze}]`);
-	else if (stop === "ratelimited") info(`BACKOFF ${host} (${det.model}): rate-limited (503) — stopped after ${tries}`);
+	else if (stop === "offline") info(`SKIP ${host} (${det.model}): went offline mid-solve (503) after ${tries} tries`);
 	else if (stop === "error") info(`SKIP ${host} (${det.model}): authenticate error (offline/migrated?)`);
 	else if (stop === "rerolled") info(`SKIP ${host} (${det.model}): password rerolled mid-broadcast — mobile NIL, can't pin (gave up after ${tries})`);
+	else if (gaveUp) ns.tprint(`FAILED ${host} (${det.model}) in ${tries} tries — strategy gave up: ${gaveUp}\nattempts:\n${JSON.stringify(trace.slice(-8), null, 2)}`);
 	else ns.tprint(`FAILED ${host} (${det.model}) in ${tries} tries — possible NEW model:\n${JSON.stringify(det.raw, null, 2)}\nattempts (watch data + ms):\n${JSON.stringify(trace.slice(-8), null, 2)}`);
 	return null;
 }

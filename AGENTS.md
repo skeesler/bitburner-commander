@@ -43,6 +43,12 @@ scripts, co-written by Sara and an assistant across sessions. Read this before w
   `bn3-runbook.md`. **Read `corp-runbook.md` (the *how*) and `corp-design.md` → "The 2026-09
   rewrite" (the *why*) before touching any of it.** Outside BN3 the money tap is `sellshares`,
   not dividends (tribute exponent 0.75 in BN10).
+- `bn15-design.md` — **BitNode 15** (entered 2026-10-09): the Red Pill is at the bottom of the fifth
+  darknet labyrinth, one lab per install. The *why* for everything BN15 added to the `dnet-*` rig:
+  `dnet-strategies.js` (pure solvers for RateMyPix.Auth, KingOfTheHill and the maze, specced in
+  `dnet-constraints.test.mjs` against the game's own formulas), `dnet-lab.js` / `dnet-lab-open.js` /
+  `dnet-lab-arm.js` (opt-in maze walker), `dnet-pin.js` (stasis anchor beside a lab), `dnet-bleed.js`
+  (charisma grinder), `dnet-map.js` (quiet map by row) and `dnet-reset.js` (run after every install).
 - `hacknet-*.js` — the hacknet and its hash economy rig, and the point of **BitNode 9** (Sara ran
   BN9 2026-09-02 → 2026-09-07, banking SF9.1; she'll return for 9.2 once the corp rig is proven
   outside BN3). Still at the probe stage. `hacknet-design.md` tags every claim [SRC] (read from the v3.0.1 tag), [LIVE] (confirmed
@@ -187,6 +193,11 @@ darknet code. API surface re-derived from the official 3.0 docs, now being confi
     ignored** (`RamCalculations.ts:225-249`). A local helper or property named `probe` bills you
     `ns.dnet.probe`; one named `research` bills **20GB** for `ns.corporation.research` — in a file that
     never touches either namespace. Name locals defensively.
+  - **It bit the darknet crawler too, for three months** (found 2026-10-09). `dnet-solve.js` named its
+    guess helper `attempt` → billed 10 GB as `ns.codingcontract.attempt`, making the crawler 15.3 GB
+    instead of ~5.3. That is the whole "crawler won't fit a 16 GB node" saga in `darknet-design.md`.
+    Renamed `guessOnce`. Audit a module by stripping comments/strings and matching identifiers against
+    the leaf keys of `src/Netscript/RamCostGenerator.ts` (v3.0.1).
   - **...but strings, comments and unused imports are free** [LIVE 2026-09-27]. The walker bills
     real code identifiers only: `corp-report.js` prints the words `research`, `sellShares` and
     `issueNewShares` in its output text and was NOT billed for them, and it pays nothing for the

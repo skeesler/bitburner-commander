@@ -35,7 +35,7 @@ export async function main(ns) {
 	const pos = ns.args.filter((a) => typeof a !== "string" || !a.startsWith("--")); // positional args, flags stripped
 	const from = pos[0] || ""; // parent — don't relay back into it
 	const depth = Number(pos[1] ?? 0);
-	const maxDepth = Number(pos[2] ?? 8);
+	const maxDepth = Number(pos[2] ?? 12); // hops; match the crawler
 	const runId = pos[3] || String(Date.now());
 	const seen = `dnet-sseen-${runId}.txt`; // scout's own per-run marker (distinct from crawl/loot)
 	const passwords = db.loadDB(ns).passwords; // the shipped book — what we can crack without solving
@@ -63,7 +63,19 @@ export async function main(ns) {
 	for (const host of neighbors) {
 		if (host === from) continue;
 		if (ns.fileExists(seen, host)) continue;
-		cataloged.push({ host }); // no getServerDetails here (too heavy) — hostname/edge only
+		// Record its row and model too, so dnet-map.js can place it. Free: the row label at the end already
+		// pays for getServerDetails, and RAM is billed per function, not per call. Offline ⇒ name only.
+		let det = null;
+		try {
+			det = d.getServerDetails(host);
+		} catch (e) {
+			/* gone between probe and now */
+		}
+		cataloged.push(
+			det?.isOnline
+				? { host, depth: det.depth, charismaReq: det.requiredCharismaSkill, model: det.modelId, stationary: det.isStationary, blockedRam: det.blockedRam }
+				: { host },
+		);
 
 		const pw = passwords[host];
 		if (pw == null) continue; // unknown password — the scout can't solve; leave it for crawl/loot
@@ -100,5 +112,6 @@ export async function main(ns) {
 
 	db.report(ns, { from: here, servers: cataloged }); // catalog the whole layer (incl. uncracked)
 	await db.flush(ns);
-	info(`[${here}] d${depth}: mapped ${neighbors.length} neighbor(s), reached ${reached}, spawned ${spawned} scout(s)`);
+	const row = ns.dnet.getServerDetails().depth; // this server's row in the net (darkweb is -1)
+	info(`[${here}] hop ${depth}, row ${row >= 0 ? row : "–"}: mapped ${neighbors.length} neighbor(s), reached ${reached}, spawned ${spawned} scout(s)`);
 }

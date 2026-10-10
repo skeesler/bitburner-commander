@@ -64,7 +64,7 @@ export async function main(ns) {
 	const pos = ns.args.filter((a) => typeof a !== "string" || !a.startsWith("--")); // positional args, flags stripped
 	const from = pos[0] || "";
 	const depth = Number(pos[1] ?? 0);
-	const maxDepth = Number(pos[2] ?? 6);
+	const maxDepth = Number(pos[2] ?? 12); // hops; match the crawler
 	const runId = pos[3] || String(Date.now());
 	const seen = `dnet-lseen-${runId}.txt`; // looter's own per-run marker
 	const passwords = db.loadDB(ns).passwords; // read the shipped password book
@@ -118,5 +118,6 @@ export async function main(ns) {
 		else ns.tprint(`[${here}] exec loot on ${host} failed (RAM?)`);
 	}
 
-	info(`[${here}] d${depth}: harvested ${got} file(s), spawned ${spawned} deeper looter(s)`);
+	const row = ns.dnet.getServerDetails().depth; // this server's row in the net (darkweb is -1)
+	info(`[${here}] hop ${depth}, row ${row >= 0 ? row : "–"}: harvested ${got} file(s), spawned ${spawned} deeper looter(s)`);
 }
